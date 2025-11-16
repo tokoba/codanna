@@ -107,6 +107,7 @@ sequenceDiagram
 | 15 MB     | 小さい          | 高い          | 短い          | 低い    |
 
 **メカニズム**:
+
 1. 小さいheap → 小さいセグメント
 2. AVスキャン時間短縮 → ファイルロック時間短縮
 3. 次のファイル操作（rename/delete）との競合確率低下
@@ -157,6 +158,7 @@ let mut writer = self.index.writer::<Document>(self.heap_size)?;
 #### 安全性の検証
 
 shimaiレビュー結果：
+
 - ✅ **削除操作は巨大メモリ不要**（削除キューに命令を積むだけ）
 - ✅ **`clear`（全削除）も論理削除**で低メモリ
 - ⚠️ **極端に小さい値は避ける**（最小10MB推奨）
@@ -197,6 +199,7 @@ let is_transient = std::error::Error::source(&e)
 ```
 
 **問題点**:
+
 - Windows共有違反（32）は `ErrorKind::Other` なので検出されない
 - エラーチェーン全体を走査していない
 - メッセージベースのフォールバックがない
@@ -606,12 +609,14 @@ parallel_threads = 8  # または num_cpus
 ### 6.2 Windows Defenderの除外設定
 
 **推奨除外パス**:
+
 ```
 C:\Users\<username>\<project>\.codanna\index\
 C:\Users\<username>\<project>\.codanna\index\tantivy\
 ```
 
 **設定手順**:
+
 1. Windows セキュリティ → ウイルスと脅威の防止
 2. 設定の管理 → 除外
 3. 除外の追加 → フォルダー
@@ -695,6 +700,7 @@ C:\Users\<username>\<project>\.codanna\index\tantivy\
 #### 10.2.1 エラーメッセージ文字列依存の脆弱性
 
 **問題**:
+
 ```rust
 // 修正案（セクション3.3）より
 let msg = err.to_string();
@@ -706,11 +712,13 @@ if msg.contains("Index writer was killed")
 ```
 
 **リスク**:
+
 - Tantivyライブラリのメッセージ変更で壊れる
 - 型安全性の欠如
 - 誤判定による不適切なリカバリ
 
 **推奨修正**:
+
 ```rust
 use tantivy::TantivyError::*;
 
@@ -723,6 +731,7 @@ fn is_writer_killed(e: &tantivy::TantivyError) -> bool {
 #### 10.2.2 プラットフォーム誤判定
 
 **問題**:
+
 ```rust
 fn is_windows_transient_code(code: i32) -> bool {
     matches!(code, 32 | 33 | 80 | 183 | 1224 | 145 | 995)
@@ -732,6 +741,7 @@ fn is_windows_transient_code(code: i32) -> bool {
 この関数は名前に反して**非Windows環境でもコンパイル・実行される**。Linux/macOSで `raw_os_error == 32` が発生した場合、誤ってWindowsエラーと判定される。
 
 **推奨修正**:
+
 ```rust
 #[cfg(target_os = "windows")]
 fn is_transient_io(err: &tantivy::TantivyError, retry_on_access_denied: bool) -> bool {
@@ -767,6 +777,7 @@ fn is_transient_io(err: &tantivy::TantivyError, _retry_on_access_denied: bool) -
 `create_writer_with_retry` 内でリトライ待機中にロックを保持していると、他のスレッドがブロックされスループットが低下する。
 
 **推奨修正**:
+
 ```rust
 // ロック外でWriter作成、成功後に短時間だけロックしてセット
 fn create_writer_outside_lock(&self) -> Result<IndexWriter<Document>, tantivy::TantivyError> {
@@ -791,6 +802,7 @@ fn create_writer_outside_lock(&self) -> Result<IndexWriter<Document>, tantivy::T
 `ERROR_ALREADY_EXISTS (183)`, `ERROR_FILE_EXISTS (80)`, `ERROR_DIR_NOT_EMPTY (145)` を包括的に「リトライで解消」扱いしているが、これらは**ロジックエラーのシグナル**である場合が多い。
 
 **推奨方針**:
+
 - これらのエラーは**限定的なリトライ（1〜2回）**のみ
 - 継続失敗時は構造化エラーとして早期失敗
 - 盲目的なリトライはバグを隠蔽する
@@ -803,6 +815,7 @@ fn create_writer_outside_lock(&self) -> Result<IndexWriter<Document>, tantivy::T
 上位層（DocumentIndex）の複数箇所にリトライロジックが散在し、保守性が低い。
 
 **推奨アプローチ**:
+
 ```rust
 /// Windows専用のリトライラッパー
 #[cfg(target_os = "windows")]
@@ -826,6 +839,7 @@ pub type RetryingMmapDirectory = MmapDirectory;  // 透過的
 ```
 
 **利点**:
+
 - I/O境界でリトライを集約
 - 上位層は通常のエラーハンドリングのみ
 - プラットフォーム差異の明確な分離
@@ -833,6 +847,7 @@ pub type RetryingMmapDirectory = MmapDirectory;  // 透過的
 #### 10.3.2 Poisonedロックの安全な扱い
 
 **現状の問題**:
+
 ```rust
 let mut writer_lock = match self.writer.lock() {
     Ok(lock) => lock,
@@ -844,6 +859,7 @@ let mut writer_lock = match self.writer.lock() {
 ```
 
 **推奨修正**:
+
 ```rust
 let mut writer_lock = match self.writer.lock() {
     Ok(lock) => lock,
@@ -873,6 +889,7 @@ let mut writer_lock = match self.writer.lock() {
 ### 10.4 実装優先度の再評価
 
 #### 元の優先度（セクション3.1）
+
 | 優先度 | 修正内容 |
 |--------|---------|
 | 高 | heap_size統一、Windowsエラーコード拡充 |
@@ -882,6 +899,7 @@ let mut writer_lock = match self.writer.lock() {
 #### 推奨優先度（批判的レビュー後）
 
 **最優先（即時実施）**:
+
 1. ✅ 文字列一致の除去（型ベース判定への移行）
 2. ✅ プラットフォーム別の `#[cfg]` 分離
 3. ✅ ロック保持範囲の最適化（スリープをロック外に）
@@ -906,6 +924,7 @@ let mut writer_lock = match self.writer.lock() {
 #### 追加すべきテスト
 
 **失敗注入テスト（自動化）**:
+
 ```rust
 #[cfg(test)]
 mod failpoint_tests {
@@ -929,6 +948,7 @@ mod failpoint_tests {
 ```
 
 **競合テスト**:
+
 ```rust
 #[test]
 fn test_concurrent_reader_writer() {
@@ -939,6 +959,7 @@ fn test_concurrent_reader_writer() {
 ```
 
 **ロック毒化テスト**:
+
 ```rust
 #[test]
 fn test_poisoned_lock_recovery() {
@@ -949,6 +970,7 @@ fn test_poisoned_lock_recovery() {
 ```
 
 **リグレッションテスト**:
+
 ```rust
 #[bench]
 fn bench_indexing_with_different_heap_sizes() {
@@ -964,6 +986,7 @@ fn bench_indexing_with_different_heap_sizes() {
 **問題**: 同一インデックスへの並列プロセス起動が競合を悪化させる
 
 **推奨**:
+
 ```rust
 use fs2::FileExt;
 
@@ -978,6 +1001,7 @@ pub fn acquire_index_lock(index_path: &Path) -> io::Result<File> {
 #### 10.6.2 動的heap_sizeガイダンス
 
 **推奨**:
+
 ```rust
 // セグメント数が閾値を超えたら警告
 if segment_count > 100 {
@@ -992,6 +1016,7 @@ if segment_count > 100 {
 #### 10.6.3 構造化ログとメトリクス
 
 **推奨実装**:
+
 ```rust
 use tracing::{warn, error};
 
@@ -1082,11 +1107,13 @@ fn is_transient_io_error(err: &TantivyError, _retry_on_access_denied: bool) -> b
 ### 10.8 まとめと勧告
 
 #### ✅ 設計の強み
+
 - Windows共有違反への実務的アプローチ
 - heap_size削減による競合確率低下
 - 指数バックオフ+ジッターの導入
 
 #### ⚠️ 重大な懸念事項
+
 1. **文字列依存**: 型ベース判定への移行が必須
 2. **プラットフォーム混在**: `#[cfg]` による明確な分離が必要
 3. **ロック設計**: スリープをロック外に移動
@@ -1094,17 +1121,20 @@ fn is_transient_io_error(err: &TantivyError, _retry_on_access_denied: bool) -> b
 5. **ログ肥大**: 構造化ログ+レート制限の実装
 
 #### 🎯 最優先実施事項
+
 1. エラー判定を型ベースに書き換え（文字列一致の除去）
 2. Windows/非Windowsで `#[cfg]` 分離
 3. ロック保持範囲の最適化
 4. `tracing` crateへの移行とレート制限
 
 #### 💡 推奨アーキテクチャ
+
 - **Directory層でのリトライ集約**: I/O境界で透過的に対処
 - **プラットフォーム別モジュール**: `windows.rs`, `unix.rs` での実装分離
 - **型安全なエラー分類**: Tantivyのエラーバリアントを活用
 
 #### 📊 検証の重要性
+
 - 失敗注入テストの自動化（Failpoint/モックDirectory）
 - 競合・ロック毒化の再現テスト
 - heap_size変更によるパフォーマンスリグレッション測定
@@ -1135,6 +1165,7 @@ fn is_transient_io_error(err: &TantivyError, _retry_on_access_denied: bool) -> b
 Shimaiのレビューを補完する形で、Geminiの視点から以下の点を追加で指摘します。
 
 #### 指摘1: `src/storage/persistence.rs` の `clear` 関数のリトライロジックの不備
+
 **重要度**: 中
 
 設計書の修正範囲は主に `src/storage/tantivy.rs` に集中していますが、インデックス全体を削除する `IndexPersistence::clear` 関数内にも、Windows環境でのファイルロックを考慮したリトライロジックが存在します。
@@ -1161,6 +1192,7 @@ match std::fs::remove_dir_all(&tantivy_path) {
 この実装は `ErrorKind::PermissionDenied` (エラーコード 5) のみをリトライ対象としており、設計書で特定された根本原因である `ERROR_SHARING_VIOLATION` (32) や `ERROR_LOCK_VIOLATION` (33) を考慮していません。インデックスの削除時にも同様の競合が発生する可能性は高いため、`tantivy.rs` で導入する新しいエラー判定ロジック（`is_windows_transient_io_error` に相当するもの）を `clear` 関数にも適用し、エラーハンドリング戦略を統一すべきです。
 
 #### 指摘2: Poisoned Mutex の回復処理の危険性
+
 **重要度**: 高
 
 設計書および `tantivy.rs` の既存コードには、`Mutex` がポイズニングされた場合に `poisoned.into_inner()` を呼び出して処理を続行する箇所があります。
@@ -1181,6 +1213,7 @@ let mut writer_lock = match self.writer.lock() {
 警告を出すだけで処理を続行すると、破損したインデックスがコミットされたり、予測不能なクラッシュを引き起こす原因となります。Shimaiの提案通り、ポイズニングを検知した場合は、安全に処理を中断し、状態を完全に再初期化（writerを破棄）した上で、呼び出し元に明確なエラーを返すべきです。
 
 #### 指摘3: 設定ファイル (`config.rs`) のコメントの改善
+
 **重要度**: 低
 
 `src/config.rs` における `tantivy_heap_mb` のデフォルト値のコメントは、現状では汎用的な説明に留まっています。
@@ -1351,6 +1384,561 @@ fn default_tantivy_heap_mb() -> usize {
 
 ---
 
+### 11.6 実環境調査結果（Phase 0 Observation）
+
+**目的**: Windows環境での実際のエラー特性を詳細に観測し、適切な修正範囲を特定する
+
+#### 11.6.1 調査方法
+
+**Phase 0実装内容**:
+- ログ強化のみ（挙動変更なし）
+- `format_tantivy_error()`: エラーチェーン全体の詳細化
+- `win_error_name()`: Windowsエラーコード名解決
+- `extract_windows_error_code()`: テスト/観測用エラーコード抽出
+
+**テスト設定**:
+```toml
+[indexing]
+tantivy_heap_mb = 100  # エラー誘発用の大きめの値
+max_retry_attempts = 1  # リトライ無効化でエラー観測
+parallel_threads = 1    # 並行度抑制で観測容易化
+```
+
+**ワークロード**:
+- 20,000ドキュメント追加
+- 500件ごとにcommit（flush/rename頻度を上げて競合誘発）
+- heap_size: 10/15/50/100/150/200MBで比較
+
+#### 11.6.2 収集すべき情報
+
+**エラー発生時の記録項目**:
+- **操作種別**: commit, store_metadata, writer.create, delete, rename
+- **TantivyErrorバリアント**: ErrorInThread, IoError等
+- **エラーチェーン深さ**: source()の階層数
+- **raw_os_error**: Windowsエラーコード（該当時）
+- **ErrorKind**: PermissionDenied, Other, WouldBlock等
+- **同時オープンハンドル数**: 並列度の推定
+- **直前の操作**: flush, merge, rename, delete
+- **ビルドモード**: debug/release
+- **設定スナップショット**: heap_size, max_retry_attempts, parallel_threads
+
+**出力形式（例）**:
+```
+(Phase0) create_writer_with_retry failed on attempt 1: ...
+(Phase0) Detailed error:
+TantivyError: An error occurred in a thread: 'An index writer was killed..'
+  variant_hint: ErrorInThread(...)
+  cause[0]: An index writer was killed
+  cause[1]: io error: The process cannot access the file because it is being used by another process.
+    io::ErrorKind: Other
+    raw_os_error: 32 (ERROR_SHARING_VIOLATION)
+```
+
+#### 11.6.3 期待される観測結果
+
+**heap_sizeとエラー発生率の相関**:
+| heap_size | セグメントサイズ | AVスキャン時間 | エラー発生率（予測） |
+|-----------|-----------------|---------------|---------------------|
+| 10 MB     | 極小            | 極短          | 極低                |
+| 15 MB     | 小              | 短            | 低                  |
+| 50 MB     | 中              | 中            | 中                  |
+| 100 MB    | 大              | 長            | 高                  |
+| 200 MB    | 極大            | 極長          | 極高                |
+
+**頻出エラーコード（予測）**:
+1. **32 (ERROR_SHARING_VIOLATION)**: Windows Defenderによるファイルロック競合
+2. **1224 (ERROR_USER_MAPPED_FILE)**: mmapファイル開放中の削除試行
+3. **33 (ERROR_LOCK_VIOLATION)**: ファイルロック競合
+4. **5 (ERROR_ACCESS_DENIED)**: 一時的な権限拒否（AV中）
+
+**操作種別別の発生傾向（予測）**:
+- **commit時**: 高（merge/rename/delete操作が集中）
+- **writer.create時**: 中（既存セグメントとの競合）
+- **store_metadata時**: 低（軽量操作）
+
+#### 11.6.4 観測結果の文書化（実施後に更新）
+
+**※ Phase 0実施後にこのセクションを更新**
+
+**実測エラーコード一覧**:
+- （観測後に記載）
+
+**heap_sizeとエラー発生率の実測データ**:
+- （観測後に記載）
+
+**代表的なエラーログサンプル**:
+- （観測後に記載）
+
+**調査から得られた新たな知見**:
+- （観測後に記載）
+
+---
+
+### 11.7 段階的実装計画（Test Reproducibility Driven）
+
+**方針**: 観測→解決→実装の3段階で、各フェーズでリスクを最小化しながら確実に進める
+
+#### 11.7.1 Phase 0: Observation & Logging（観測フェーズ）
+
+**目的**: 挙動を変えずにWindows環境での実際のエラー特性を収集
+
+**実装範囲**:
+1. ログ強化関数の追加（`src/storage/tantivy.rs`）
+   ```rust
+   // Windows専用エラー名解決
+   #[cfg(target_os = "windows")]
+   fn win_error_name(code: i32) -> &'static str { ... }
+   
+   // 全プラットフォーム対応エラー詳細化
+   fn format_tantivy_error(err: &tantivy::TantivyError) -> String { ... }
+   
+   // Windowsエラーコード抽出（テスト用）
+   pub(crate) fn extract_windows_error_code(err: &tantivy::TantivyError) -> Option<i32> { ... }
+   ```
+
+2. 既存メソッドへの観測ログ追加（振る舞い変更なし）
+   - `create_writer_with_retry()` の `Err(e)` 分岐
+   - `commit_batch()` の `Err(e)` 分岐
+   - デバッグビルドまたは`Settings.debug`有効時のみ詳細出力
+
+3. パラメータ化テストの追加（`tests/heap_size_regression.rs`）
+   - `#[ignore]`付きで手動実行
+   - heap_size: 10/15/50/100/150/200MBで比較
+   - エラー発生率とリカバリー成功率を記録
+
+4. AVスキャンシミュレーターの追加（`tests/helpers/av_simulator.rs`）
+   - `notify`でファイル作成イベント検知
+   - `CreateFileW`を共有なしで開き短時間保持
+   - ERROR_SHARING_VIOLATION誘発
+
+**実装制約**:
+- ❌ エラー判定ロジックの変更禁止
+- ❌ リトライ戦略の追加禁止
+- ❌ heap_size固定値の修正禁止（Phase 1で実施）
+- ✅ ログ出力のみOK
+
+**成果物**:
+- Section 11.6.4の観測結果データ
+- Windows特有エラーコードの出現頻度リスト
+- heap_sizeとエラー発生率の相関グラフ
+
+**所要時間見積もり**:
+- 実装: 4-6時間
+- テスト実行・データ収集: 8-12時間（Windows環境）
+- ドキュメント更新: 2-4時間
+
+---
+
+#### 11.7.2 Phase 1: Targeted Fix（解決フェーズ）
+
+**目的**: Phase 0の観測結果に基づき、限定的な修正のみを実施
+
+**実装範囲**（観測結果により調整）:
+
+**1. heap_size統一（優先度: 最高）**
+```rust
+// src/storage/tantivy.rs
+// L1055: remove_file_documents
+// L1294: clear
+// 修正前: 50_000_000
+// 修正後: self.heap_size または normalized_heap_bytes(self.heap_size)
+
+fn normalized_heap_bytes(heap_bytes: usize) -> usize {
+    const MIN_HEAP: usize = 10 * 1024 * 1024;  // 10MB
+    const MAX_HEAP: usize = 2 * 1024 * 1024 * 1024;  // 2GB
+    heap_bytes.clamp(MIN_HEAP, MAX_HEAP)
+}
+```
+
+**2. Windowsエラーコード対応の拡充（観測結果に基づき選択）**
+
+観測で頻出したコードのみ追加（過剰実装回避）:
+```rust
+#[cfg(target_os = "windows")]
+fn is_windows_transient_code(code: i32) -> bool {
+    match code {
+        32 => true,  // ERROR_SHARING_VIOLATION（必須）
+        33 => true,  // ERROR_LOCK_VIOLATION（必須）
+        1224 => true, // ERROR_USER_MAPPED_FILE（必須）
+        995 => true,  // ERROR_OPERATION_ABORTED（頻出時）
+        303 => true,  // ERROR_DELETE_PENDING（頻出時）
+        // 以下は観測結果次第で追加
+        // 170 => true,  // ERROR_BUSY
+        // 997 => true,  // ERROR_IO_PENDING
+        _ => false,
+    }
+}
+```
+
+**3. 限定的リトライ戦略（80/183/145の扱い）**
+```rust
+// ERROR_FILE_EXISTS (80), ERROR_ALREADY_EXISTS (183), ERROR_DIR_NOT_EMPTY (145)
+// は1-2回のみリトライ、継続失敗時は早期fail
+fn should_retry_transient(code: i32, attempt: u32) -> bool {
+    match code {
+        80 | 183 | 145 => attempt < 2, // 限定的リトライ
+        32 | 33 | 1224 | 995 => true,   // 無制限リトライ
+        _ => false,
+    }
+}
+```
+
+**4. Poisoned Mutex安全化（優先度: 高）**
+```rust
+// commit_batch() 内
+let mut writer_lock = match self.writer.lock() {
+    Ok(lock) => lock,
+    Err(poisoned) => {
+        eprintln!("FATAL: Writer mutex poisoned; reinitializing");
+        
+        // 既存writerを破棄
+        let _ = poisoned.into_inner().take();
+        
+        // カウンタ初期化
+        if let Ok(mut pending) = self.pending_symbol_counter.lock() {
+            *pending = None;
+        }
+        if let Ok(mut pending) = self.pending_file_counter.lock() {
+            *pending = None;
+        }
+        
+        // 明示エラー返却（継続禁止）
+        return Err(StorageError::General(
+            "Writer was poisoned and reinitialized. Please retry operation.".into()
+        ));
+    }
+};
+```
+
+**5. config.rsコメント更新**
+```rust
+// src/config.rs
+/// Tantivy heap size in megabytes.
+/// Controls memory usage before flushing to disk.
+/// On Windows, antivirus software can cause file locking issues with large heap sizes.
+/// Reducing this to 15-25MB is recommended for Windows environments to improve stability.
+#[serde(default = "default_tantivy_heap_mb")]
+pub tantivy_heap_mb: usize,
+```
+
+**実装制約**:
+- ✅ heap_size統一は必須
+- ✅ 観測で頻出したエラーコードのみ追加
+- ✅ Poisoned Mutex安全化は必須
+- ❌ プラットフォーム分離（`#[cfg]`）はPhase 2で実施
+- ❌ ロック外スリープはPhase 2で実施
+- ❌ Directory層リトライ集約はPhase 2で実施
+
+**テスト戦略**:
+- heap_size統一後、再度パラメータ化テストを実行
+- エラー発生率の変化を測定
+- リカバリー成功率の向上を確認
+
+**成果物**:
+- Section 3の修正コード反映
+- テスト結果の比較データ
+- Phase 1修正の効果測定レポート
+
+**所要時間見積もり**:
+- 実装: 8-12時間
+- テスト: 4-8時間
+- ドキュメント更新: 2-4時間
+
+---
+
+#### 11.7.3 Phase 2: Full Implementation & Test（実装修正フェーズ）
+
+**目的**: 全ての修正を統合し、完全なテストスイートで検証
+
+**実装範囲**:
+
+**1. プラットフォーム分離（`#[cfg]`）**
+```rust
+#[cfg(target_os = "windows")]
+fn is_transient_io(err: &tantivy::TantivyError, retry_on_access_denied: bool) -> bool {
+    // Windows固有の実装
+    let mut src = err.source();
+    while let Some(e) = src {
+        if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+            if let Some(code) = ioe.raw_os_error() {
+                match code {
+                    32 | 33 | 1224 | 995 => return true,
+                    5 if retry_on_access_denied => return true,
+                    _ => {}
+                }
+            }
+        }
+        src = e.source();
+    }
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_transient_io(err: &tantivy::TantivyError, _retry_on_access_denied: bool) -> bool {
+    // Linux/macOS向けの実装
+    let mut src = err.source();
+    while let Some(e) = src {
+        if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+            if matches!(ioe.kind(),
+                std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::TimedOut
+            ) {
+                return true;
+            }
+        }
+        src = e.source();
+    }
+    false
+}
+```
+
+**2. ロック外スリープ**
+```rust
+// create_writer_with_retry をリファクタ
+fn create_writer_outside_lock(&self) -> Result<IndexWriter<Document>, tantivy::TantivyError> {
+    for attempt in 0..self.max_retry_attempts {
+        match self.index.writer(self.heap_size) {
+            Ok(w) => return Ok(w),
+            Err(e) if is_transient_io(&e, false) && attempt + 1 < self.max_retry_attempts => {
+                let delay = exponential_backoff_with_jitter(attempt);
+                // ロック外でスリープ
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+```
+
+**3. 型ベースエラー判定への移行**
+```rust
+use tantivy::TantivyError;
+
+fn is_writer_killed(err: &TantivyError) -> bool {
+    match err {
+        TantivyError::ErrorInThread(msg) => msg.contains("Index writer was killed"),
+        _ => false,
+    }
+}
+```
+
+**4. Directory層リトライ集約（将来アーキテクチャ）**
+```rust
+#[cfg(target_os = "windows")]
+pub struct RetryingMmapDirectory {
+    inner: MmapDirectory,
+    max_retries: u32,
+}
+
+impl Directory for RetryingMmapDirectory {
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        retry_with_backoff(|| self.inner.atomic_write(path, data))
+    }
+}
+```
+
+**テスト戦略**:
+- `cargo test --all` で全テストパス確認
+- Windows統合テスト（手動/専用CI）
+- パフォーマンスリグレッションテスト
+- 失敗注入テスト（Section 11.8参照）
+
+**成果物**:
+- 完全な実装コード
+- 全テストパス
+- 性能測定レポート
+- 最終ドキュメント更新
+
+**所要時間見積もり**:
+- 実装: 16-24時間
+- テスト: 8-16時間
+- ドキュメント更新: 4-8時間
+
+---
+
+#### 11.7.4 フィーチャーフラグとテスト運用方針
+
+**重いテストの分離**:
+```toml
+# Cargo.toml
+[features]
+windows-av-sim = ["notify", "windows-sys"]
+```
+
+```rust
+#[cfg(all(test, target_os = "windows", feature = "windows-av-sim"))]
+mod av_integration_tests {
+    // AVシミュレーター使用テスト
+}
+```
+
+**CI運用**:
+- 通常CI: `cargo test` （`#[ignore]`テストは除外）
+- 週次CI: `cargo test --ignored --features windows-av-sim` （Windows専用ワーカー）
+
+**ログレート制御方針**:
+```rust
+// Phase 0の詳細ログは本番では出さない
+let debug = cfg!(debug_assertions) || std::env::var("CODANNA_DEBUG").is_ok();
+if debug {
+    eprintln!("(Phase0) Detailed error:\n{}", format_tantivy_error(&e));
+}
+```
+
+---
+
+### 11.8 失敗注入テスト設計（将来）
+
+**目的**: Windows特有の競合状態を安定的にCI環境で再現・検証
+
+#### 11.8.1 FailingDirectory設計
+
+**概要**: TantivyのDirectory traitを実装し、指定操作で意図的にエラーを返すモック
+
+**実装例**:
+```rust
+use tantivy::directory::{Directory, DirectoryError};
+
+pub struct FailingDirectory {
+    inner: Box<dyn Directory>,
+    failure_config: FailureConfig,
+}
+
+struct FailureConfig {
+    fail_on: Operation,       // atomic_write, delete, rename等
+    error_code: i32,          // 32 (ERROR_SHARING_VIOLATION)等
+    fail_count: usize,        // N回目まで失敗
+    current_count: AtomicUsize,
+}
+
+impl Directory for FailingDirectory {
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> Result<(), DirectoryError> {
+        if self.should_fail(Operation::AtomicWrite) {
+            return Err(DirectoryError::IoError(io::Error::from_raw_os_error(
+                self.failure_config.error_code
+            )));
+        }
+        self.inner.atomic_write(path, data)
+    }
+    
+    // delete, rename等も同様
+}
+```
+
+#### 11.8.2 テストケース設計
+
+**テスト1: ERROR_SHARING_VIOLATION再現**
+```rust
+#[test]
+fn test_sharing_violation_recovery() {
+    let failing_dir = FailingDirectory::new(
+        MmapDirectory::open("./test_index").unwrap(),
+        FailureConfig {
+            fail_on: Operation::Rename,
+            error_code: 32, // ERROR_SHARING_VIOLATION
+            fail_count: 3,  // 3回失敗後に成功
+            current_count: AtomicUsize::new(0),
+        },
+    );
+    
+    let index = Index::create(failing_dir, schema).unwrap();
+    // 通常操作を実行し、リトライ成功を検証
+}
+```
+
+**テスト2: Poisoned Mutex回復**
+```rust
+#[test]
+fn test_poisoned_lock_recovery() {
+    // 内部で意図的にpanicさせる
+    // poisoned経路の完全初期化を検証
+    // 状態不整合がないことを確認
+}
+```
+
+**テスト3: 限定的リトライ検証**
+```rust
+#[test]
+fn test_already_exists_limited_retry() {
+    let failing_dir = FailingDirectory::new(
+        /* ... */,
+        FailureConfig {
+            fail_on: Operation::Create,
+            error_code: 183, // ERROR_ALREADY_EXISTS
+            fail_count: 10,  // 10回連続失敗設定
+            current_count: AtomicUsize::new(0),
+        },
+    );
+    
+    // 2回のリトライ後に早期失敗することを検証
+}
+```
+
+#### 11.8.3 CI統合方針
+
+**Phase 2以降での導入**:
+- FailingDirectoryはCI安定化後に導入
+- 初期は手動実行（`#[ignore]`）
+- 安定性確認後にCIに組み込み
+
+**利点**:
+- AVシミュレーターより再現性が高い
+- 非Windows環境でもテスト可能
+- エラーコード網羅的検証が容易
+
+---
+
+### 11.9 Windowsエラーコード付録
+
+#### 11.9.1 対応済みエラーコード
+
+| コード | 定数名 | 説明 | 対処方針 | 優先度 |
+|--------|--------|------|----------|--------|
+| 5 | ERROR_ACCESS_DENIED | アクセス拒否 | 条件付きリトライ | 中 |
+| 32 | ERROR_SHARING_VIOLATION | ファイル使用中の共有違反 | 無制限リトライ | 最高 |
+| 33 | ERROR_LOCK_VIOLATION | ファイルロック違反 | 無制限リトライ | 最高 |
+| 80 | ERROR_FILE_EXISTS | ファイル既存 | **限定的リトライ（1-2回）** | 中 |
+| 145 | ERROR_DIR_NOT_EMPTY | ディレクトリ非空 | **限定的リトライ（1-2回）** | 低 |
+| 183 | ERROR_ALREADY_EXISTS | 既存エラー | **限定的リトライ（1-2回）** | 中 |
+| 995 | ERROR_OPERATION_ABORTED | I/O操作中止 | 無制限リトライ | 高 |
+| 1224 | ERROR_USER_MAPPED_FILE | mmap中ファイル削除不可 | 無制限リトライ | 最高 |
+
+#### 11.9.2 検討中のエラーコード（Phase 0観測結果次第）
+
+| コード | 定数名 | 説明 | 想定頻度 | 対処方針 |
+|--------|--------|------|----------|----------|
+| 2 | ERROR_FILE_NOT_FOUND | ファイル未発見 | 低（競合レース） | リトライ候補 |
+| 3 | ERROR_PATH_NOT_FOUND | パス未発見 | 低（競合レース） | リトライ候補 |
+| 50 | ERROR_NOT_SUPPORTED | 未サポート操作 | 極低（環境依存） | 恒久的エラー |
+| 82 | ERROR_CANNOT_MAKE | ディレクトリ作成不可 | 低（競合） | リトライ候補 |
+| 170 | ERROR_BUSY | リソースビジー | 中 | リトライ候補 |
+| 303 | ERROR_DELETE_PENDING | 削除保留中 | 中（rename競合） | リトライ候補 |
+| 997 | ERROR_IO_PENDING | 非同期I/O保留 | 低 | リトライ候補 |
+| 1314 | ERROR_PRIVILEGE_NOT_HELD | 権限不足 | 極低 | 恒久的エラー |
+
+#### 11.9.3 エラーコード追加基準
+
+**Phase 0観測で以下を満たす場合のみ追加**:
+1. **頻度**: 1,000回の操作中10回以上発生
+2. **再現性**: 複数環境で確認
+3. **安全性**: リトライで解決し、データ破損リスクなし
+4. **必要性**: 既存コード（32/33/1224）でカバーできない
+
+**除外基準**:
+- 恒久的エラー（権限設定ミス、サポート外操作等）
+- ロジックエラーのサイン（整合性違反等）
+- 極低頻度（1,000回中1回未満）
+
+#### 11.9.4 参考資料
+
+- [System Error Codes (0-499) - Microsoft](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-)
+- [System Error Codes (1000-1299) - Microsoft](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--1000-1299-)
+- [File Management Error Codes - Microsoft](https://learn.microsoft.com/en-us/windows/win32/debug/file-management-error-codes)
+
+---
+
 ## 12. 改訂履歴
 
 | 日付 | バージョン | 変更内容 | 担当 |
@@ -1358,6 +1946,7 @@ fn default_tantivy_heap_mb() -> usize {
 | 2025-01-15 | 1.0 | 初版作成 | システムアーキテクト |
 | 2025-01-15 | 1.1 | セカンドオピニオンレビュー追加（セクション10） | shimai (gpt-5) |
 | 2025-01-15 | 1.2 | Gemini批判的レビュー追加（セクション11） | Gemini 2.5 Pro |
+| 2025-01-15 | 1.3 | Test Reproducibility Driven approach追加（セクション11.6-11.9）、shimai最終レビュー反映 | shimai (gpt-5) |
 
 ---
 
@@ -1369,6 +1958,7 @@ fn default_tantivy_heap_mb() -> usize {
 | レビュアー（第1次） | shimai (gpt-5) | 2025-01-15 | ✓ |
 | レビュアー（第2次・批判的） | shimai (gpt-5) | 2025-01-15 | ✓ |
 | レビュアー（第3次・セカンドオピニオン） | Gemini 2.5 Pro | 2025-01-15 | ✓ |
+| レビュアー（第4次・最終/テスト戦略） | shimai (gpt-5) | 2025-01-15 | ✓ |
 | 承認者 | - | - | - |
 
 ---
