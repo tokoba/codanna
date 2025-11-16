@@ -661,6 +661,79 @@ impl DocumentIndex {
         unreachable!("create_writer_with_retry: loop should return earlier")
     }
 
+    /// Safe writer lock acquisition (Phase 1: Mutex poisoning mitigation)
+    /// 
+    /// Mutex毒化検出時にwriterを破棄し、明確なエラーを返却。
+    /// 次のstart_batchでクリーンに再初期化される。
+    fn lock_writer_safe(
+        &self,
+    ) -> StorageResult<std::sync::MutexGuard<'_, Option<IndexWriter<Document>>>> {
+        match self.writer.lock() {
+            Ok(guard) => Ok(guard),
+            Err(poisoned) => {
+                // 毒化検出: writer破棄して明示エラー
+                let mut inner = poisoned.into_inner();
+                *inner = None;
+                Err(StorageError::General(
+                    "Writer mutex poisoned; reinitialized. Please retry with start_batch."
+                        .to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Commit with retry logic for temporary writer (Phase 1: Section 11.7.2.5)
+    /// 
+    /// remove_file_documents/clear等の一時的なwriter用commit。
+    /// Windows一時I/Oエラーに対するリトライロジックを適用。
+    fn commit_with_retry_for_temp(
+        &self,
+        writer: &mut IndexWriter<Document>,
+    ) -> Result<(), tantivy::TantivyError> {
+        let attempts = self.max_retry_attempts.max(4);
+        let mut last_error: Option<tantivy::TantivyError> = None;
+
+        for attempt in 0..attempts {
+            match writer.commit() {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    // 致命的エラー検出
+                    if is_writer_killed(&e) {
+                        return Err(e);
+                    }
+
+                    // Windows一時I/Oエラーの判定とリトライ分類
+                    let retry_class = windows_error_retry_class(&e);
+                    let should_retry = match retry_class {
+                        WindowsIoRetryClass::Always => true,
+                        WindowsIoRetryClass::Conditional => true,
+                        WindowsIoRetryClass::Limited(limit) => attempt < limit,
+                        WindowsIoRetryClass::None => false,
+                    };
+
+                    if !should_retry || attempt + 1 >= attempts {
+                        last_error = Some(e);
+                        break;
+                    }
+
+                    // リトライ待機（指数バックオフ + jitter）
+                    let delay_ms = backoff_with_jitter_ms(attempt);
+                    if debug_enabled() {
+                        eprintln!(
+                            "(Phase1) commit_temp retry: attempt={}/{} delay={}ms",
+                            attempt + 1,
+                            attempts,
+                            delay_ms
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
+    }
+
     /// Enable vector search support with the given engine and storage path
     pub fn with_vector_support(
         mut self,
@@ -988,37 +1061,56 @@ impl DocumentIndex {
 
     /// Start a batch operation for adding multiple documents
     pub fn start_batch(&self) -> StorageResult<()> {
-        // まずロックを取得して状態チェック
-        let needs_writer = {
+        // 1) 早期パス: 既にwriterがあるなら即return
+        {
             let writer_lock = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
-            writer_lock.is_none()
-        }; // ここでロック解放
-
-        if needs_writer {
-            // ロック外でwriter作成（リトライ処理中に他スレッドをブロックしない）
-            let writer = self.create_writer_with_retry()?;
-            
-            // 再度ロック取得してwriter格納
-            let mut writer_lock = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
-            if writer_lock.is_none() {
-                *writer_lock = Some(writer);
-
-                // Initialize the pending symbol counter for this batch
-                let current = self
-                    .query_metadata(MetadataKey::SymbolCounter)?
-                    .unwrap_or(0) as u32;
-                if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
-                    *pending_guard = Some(current + 1);
-                }
-
-                // Initialize the pending file counter for this batch
-                let file_current = self.query_metadata(MetadataKey::FileCounter)?.unwrap_or(0) as u32;
-                if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
-                    *pending_guard = Some(file_current + 1);
-                }
+            if writer_lock.is_some() {
+                return Ok(());
             }
         }
-        Ok(())
+
+        // 2) ロック外でメタデータ問い合わせ（ロック時間短縮）
+        let next_symbol = self
+            .query_metadata(MetadataKey::SymbolCounter)?
+            .unwrap_or(0) as u32 + 1;
+        let next_file = self
+            .query_metadata(MetadataKey::FileCounter)?
+            .unwrap_or(0) as u32 + 1;
+
+        // 3) ロック外でwriter作成を試みる
+        match self.create_writer_with_retry() {
+            Ok(writer) => {
+                // 4) 短時間ロックでセット
+                let mut writer_lock = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
+                if writer_lock.is_none() {
+                    *writer_lock = Some(writer);
+                    if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+                        *pending_guard = Some(next_symbol);
+                    }
+                    if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
+                        *pending_guard = Some(next_file);
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // 5) レース対応: 他スレッドが先にセット済みか再確認
+                let writer_lock = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
+                if writer_lock.is_some() {
+                    // 他スレッドが作成済みなので成功扱い
+                    drop(writer_lock);
+                    if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+                        *pending_guard = Some(next_symbol);
+                    }
+                    if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
+                        *pending_guard = Some(next_file);
+                    }
+                    return Ok(());
+                }
+                // 本当に失敗
+                Err(e.into())
+            }
+        }
     }
 
     /// Add a document to the index (must call start_batch first)
@@ -1252,7 +1344,7 @@ impl DocumentIndex {
             let heap = normalized_heap_bytes(self.heap_size);
             let mut writer = self.index.writer::<Document>(heap)?;
             writer.delete_term(term);
-            writer.commit()?;
+            self.commit_with_retry_for_temp(&mut writer)?;
             self.reader.reload()?;
         }
 
@@ -1492,7 +1584,7 @@ impl DocumentIndex {
         let heap = normalized_heap_bytes(self.heap_size);
         let mut writer = self.index.writer::<Document>(heap)?;
         writer.delete_all_documents()?;
-        writer.commit()?;
+        self.commit_with_retry_for_temp(&mut writer)?;
         self.reader.reload()?;
         Ok(())
     }
@@ -1931,13 +2023,7 @@ impl DocumentIndex {
 
     /// Delete a symbol
     pub fn delete_symbol(&self, id: SymbolId) -> StorageResult<()> {
-        let mut writer_lock = match self.writer.lock() {
-            Ok(lock) => lock,
-            Err(poisoned) => {
-                eprintln!("Warning: Recovering from poisoned writer mutex in delete_symbol");
-                poisoned.into_inner()
-            }
-        };
+        let mut writer_lock = self.lock_writer_safe()?;
         let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
 
         let term = Term::from_field_u64(self.schema.symbol_id, id.0 as u64);
@@ -1947,13 +2033,7 @@ impl DocumentIndex {
 
     /// Delete relationships for a symbol
     pub fn delete_relationships_for_symbol(&self, id: SymbolId) -> StorageResult<()> {
-        let mut writer_lock = match self.writer.lock() {
-            Ok(lock) => lock,
-            Err(poisoned) => {
-                eprintln!("Warning: Recovering from poisoned writer mutex in delete_relationships");
-                poisoned.into_inner()
-            }
-        };
+        let mut writer_lock = self.lock_writer_safe()?;
         let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
 
         // Delete where from_symbol_id = id
@@ -2298,13 +2378,7 @@ impl DocumentIndex {
         to: SymbolId,
         rel: &Relationship,
     ) -> StorageResult<()> {
-        let mut writer_lock = match self.writer.lock() {
-            Ok(lock) => lock,
-            Err(poisoned) => {
-                eprintln!("Warning: Recovering from poisoned writer mutex in store_relationship");
-                poisoned.into_inner()
-            }
-        };
+        let mut writer_lock = self.lock_writer_safe()?;
         let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
 
         let mut doc = Document::new();
@@ -2378,13 +2452,7 @@ impl DocumentIndex {
         hash: &str,
         timestamp: u64,
     ) -> StorageResult<()> {
-        let mut writer_lock = match self.writer.lock() {
-            Ok(lock) => lock,
-            Err(poisoned) => {
-                eprintln!("Warning: Recovering from poisoned writer mutex in store_file_info");
-                poisoned.into_inner()
-            }
-        };
+        let mut writer_lock = self.lock_writer_safe()?;
         let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
 
         let mut doc = Document::new();
@@ -2403,13 +2471,7 @@ impl DocumentIndex {
     /// This is a pure storage operation storing raw import metadata.
     /// Resolution logic happens in the resolution layer.
     pub fn store_import(&self, import: &crate::parsing::Import) -> StorageResult<()> {
-        let mut writer_lock = match self.writer.lock() {
-            Ok(lock) => lock,
-            Err(poisoned) => {
-                eprintln!("Warning: Recovering from poisoned writer mutex in store_import");
-                poisoned.into_inner()
-            }
-        };
+        let mut writer_lock = self.lock_writer_safe()?;
         let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
 
         let mut doc = Document::new();
@@ -2513,15 +2575,7 @@ impl DocumentIndex {
     ///
     /// Used during file updates and deletions.
     pub fn delete_imports_for_file(&self, file_id: FileId) -> StorageResult<()> {
-        let mut writer_lock = match self.writer.lock() {
-            Ok(lock) => lock,
-            Err(poisoned) => {
-                eprintln!(
-                    "Warning: Recovering from poisoned writer mutex in delete_imports_for_file"
-                );
-                poisoned.into_inner()
-            }
-        };
+        let mut writer_lock = self.lock_writer_safe()?;
         let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
 
         let query = BooleanQuery::new(vec![
@@ -2547,13 +2601,7 @@ impl DocumentIndex {
 
     /// Store metadata (counters, etc.)
     pub(crate) fn store_metadata(&self, key: MetadataKey, value: u64) -> StorageResult<()> {
-        let mut writer_lock = match self.writer.lock() {
-            Ok(lock) => lock,
-            Err(poisoned) => {
-                eprintln!("Warning: Recovering from poisoned writer mutex in store_metadata");
-                poisoned.into_inner()
-            }
-        };
+        let mut writer_lock = self.lock_writer_safe()?;
         let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
 
         // First delete any existing metadata with this key

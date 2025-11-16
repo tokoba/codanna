@@ -1,16 +1,14 @@
 # C# Grammar Analysis
 
-*Generated: 2025-11-16 02:24:02 UTC*
+*Generated: 2025-11-16 07:04:22 UTC*
 
 ## Statistics
-
 - Total nodes in grammar JSON: 220
 - Nodes found in comprehensive.cs: 142
 - Nodes handled by parser: 142
 - Symbol kinds extracted: 9
 
 ## Nodes in Grammar but Not in Example
-
 **Count**: 142
 
 - `alias_qualified_name`
@@ -157,11 +155,10 @@
 - `yield_statement`
 
 ## Nodes in Example but Not Handled by Parser
-
 **Count**: 0
 
-## Nodes Handled by Parser
 
+## Nodes Handled by Parser
 **Count**: 142
 
 - `!`
@@ -306,3 +303,4 @@
 - `{`
 - `}`
 - `~`
+
