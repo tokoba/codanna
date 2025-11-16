@@ -14,10 +14,8 @@
 //!
 //! ```no_run
 //! use codanna::indexing::SimpleIndexer;
-//! use codanna::Settings;
 //!
-//! let settings = Settings::default();
-//! let indexer = SimpleIndexer::new(&settings);
+//! let indexer = SimpleIndexer::new();
 //! ```
 
 pub mod config_watcher;

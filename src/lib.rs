@@ -15,13 +15,10 @@
 //! ## 使用例
 //!
 //! ```no_run
-//! use codanna::{Settings, SimpleIndexer};
-//!
-//! // 設定を読み込む
-//! let settings = Settings::default();
+//! use codanna::SimpleIndexer;
 //!
 //! // インデクサーを作成
-//! let indexer = SimpleIndexer::new(&settings);
+//! let indexer = SimpleIndexer::new();
 //! ```
 
 // Alias for tree-sitter-kotlin dependency

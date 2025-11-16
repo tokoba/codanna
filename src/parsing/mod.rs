@@ -26,7 +26,7 @@
 //! ```no_run
 //! use codanna::parsing::{RustParser, LanguageParser};
 //!
-//! let parser = RustParser;
+//! let parser = RustParser::new().unwrap();
 //! let source = "fn main() {}";
 //! // let symbols = parser.parse(source, file_id);
 //! ```

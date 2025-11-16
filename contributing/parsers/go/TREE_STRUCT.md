@@ -4,8 +4,8 @@ Complete nested structure from comprehensive.go
 
 ```
 source_file [95]
-  comment [94] = '//! Comprehensive Go test file for parser maturity assessment'
-  comment [94] = '//! Tests all major Go language features and constructs'
+  comment [94] = '//! Comprehensive Go test file for parser maturity assessment'
+  comment [94] = '//! Tests all major Go language features and constructs'
   package_clause [96] = 'package main'
     package [5] = 'package'
     package_identifier [216] = 'main'
@@ -49,7 +49,7 @@ source_file [95]
           interpreted_string_literal_content [83] = 'unsafe'
           " [82] = '"'
       ) [10] = ')'
-  comment [94] = '// Internal module equivalent (using internal package structure)'
+  comment [94] = '// Internal module equivalent (using internal package structure)'
   type_declaration [115] = 'type InnerStruct struct{}'
     type [19] = 'type'
     type_spec [116] = 'InnerStruct struct{}'
@@ -59,14 +59,14 @@ source_file [95]
         field_declaration_list [128] = '{}'
           { [23] = '{'
           } [24] = '}'
-  comment [94] = '// Re-exports equivalent (promoted fields/methods)'
+  comment [94] = '// Re-exports equivalent (promoted fields/methods)'
   type_declaration [115] = 'type PublicInnerStruct = InnerStruct'
     type [19] = 'type'
     type_alias [114] = 'PublicInnerStruct = InnerStruct'
       name: type_identifier [218] = 'PublicInnerStruct'
       = [13] = '='
       type: type_identifier [218] = 'InnerStruct'
-  comment [94] = '// Constants'
+  comment [94] = '// Constants'
   const_declaration [102] = 'const MaxSize = 1024'
     const [11] = 'const'
     const_spec [103] = 'MaxSize = 1024'
@@ -84,7 +84,7 @@ source_file [95]
           " [82] = '"'
           interpreted_string_literal_content [83] = 'default'
           " [82] = '"'
-  comment [94] = '// Package-level variables (equivalent to statics)'
+  comment [94] = '// Package-level variables (equivalent to statics)'
   var_declaration [104] = 'var ('
     var [14] = 'var'
     var_spec_list [106] = '('
@@ -104,7 +104,7 @@ source_file [95]
           * [20] = '*'
           type_identifier [218] = 'Config'
       ) [10] = ')'
-  comment [94] = '// Type aliases'
+  comment [94] = '// Type aliases'
   type_declaration [115] = 'type Result[T any] struct {'
     type [19] = 'type'
     type_spec [116] = 'Result[T any] struct {'
@@ -142,7 +142,7 @@ source_file [95]
           [ [16] = '['
           ] [17] = ']'
           element: type_identifier [218] = 'byte'
-  comment [94] = '// Generic type alias with constraints'
+  comment [94] = '// Generic type alias with constraints'
   type_declaration [115] = 'type Handler[T any] func(T) (T, error)'
     type [19] = 'type'
     type_spec [116] = 'Handler[T any] func(T) (T, error)'
@@ -169,7 +169,7 @@ source_file [95]
           parameter_declaration [112] = 'error'
             type: type_identifier [218] = 'error'
           ) [10] = ')'
-  comment [94] = '// Struct with various field types'
+  comment [94] = '// Struct with various field types'
   type_declaration [115] = 'type Config struct {'
     type [19] = 'type'
     type_spec [116] = 'Config struct {'
@@ -206,9 +206,9 @@ source_file [95]
               field_declaration_list [128] = '{}'
                 { [23] = '{'
                 } [24] = '}'
-          comment [94] = '// Go equivalent of PhantomData'
+          comment [94] = '// Go equivalent of PhantomData'
           } [24] = '}'
-  comment [94] = '// "Tuple struct" equivalent (unnamed struct fields)'
+  comment [94] = '// "Tuple struct" equivalent (unnamed struct fields)'
   type_declaration [115] = 'type Point struct {'
     type [19] = 'type'
     type_spec [116] = 'Point struct {'
@@ -225,7 +225,7 @@ source_file [95]
             name: field_identifier [214] = 'Z'
             type: type_identifier [218] = 'float64'
           } [24] = '}'
-  comment [94] = '// Unit struct equivalent'
+  comment [94] = '// Unit struct equivalent'
   type_declaration [115] = 'type Marker struct{}'
     type [19] = 'type'
     type_spec [116] = 'Marker struct{}'
@@ -235,7 +235,7 @@ source_file [95]
         field_declaration_list [128] = '{}'
           { [23] = '{'
           } [24] = '}'
-  comment [94] = '// Struct with "lifetime" equivalent (no direct translation, using context)'
+  comment [94] = '// Struct with "lifetime" equivalent (no direct translation, using context)'
   type_declaration [115] = 'type BorrowedData struct {'
     type [19] = 'type'
     type_spec [116] = 'BorrowedData struct {'
@@ -259,9 +259,9 @@ source_file [95]
               package: package_identifier [216] = 'context'
               . [7] = '.'
               name: type_identifier [218] = 'Context'
-          comment [94] = '// Context for lifetime-like behavior'
+          comment [94] = '// Context for lifetime-like behavior'
           } [24] = '}'
-  comment [94] = '// Enum equivalent using type and constants'
+  comment [94] = '// Enum equivalent using type and constants'
   type_declaration [115] = 'type Status int'
     type [19] = 'type'
     type_spec [116] = 'Status int'
@@ -283,7 +283,7 @@ source_file [95]
     const_spec [103] = 'StatusComplex'
       name: identifier [1] = 'StatusComplex'
     ) [10] = ')'
-  comment [94] = '// Complex enum with data (using interface and concrete types)'
+  comment [94] = '// Complex enum with data (using interface and concrete types)'
   type_declaration [115] = 'type StatusData interface {'
     type [19] = 'type'
     type_spec [116] = 'StatusData interface {'
@@ -407,7 +407,7 @@ source_file [95]
     body: block [136] = '{}'
       { [23] = '{'
       } [24] = '}'
-  comment [94] = '// Generic enum equivalent'
+  comment [94] = '// Generic enum equivalent'
   type_declaration [115] = 'type Option[T any] interface {'
     type [19] = 'type'
     type_spec [116] = 'Option[T any] interface {'
@@ -503,7 +503,7 @@ source_file [95]
     body: block [136] = '{}'
       { [23] = '{'
       } [24] = '}'
-  comment [94] = '// Interface with associated types (Go interfaces)'
+  comment [94] = '// Interface with associated types (Go interfaces)'
   type_declaration [115]
     type [19] = 'type'
     type_spec [116] = 'Parser[Input, Output any] interface {'
@@ -560,9 +560,9 @@ source_file [95]
               type_elem [132] = 'Output'
                 type_identifier [218] = 'Output'
               ] [17] = ']'
-        comment [94] = '// Associated function equivalent'
+        comment [94] = '// Associated function equivalent'
         } [24] = '}'
-  comment [94] = '// Interface with generic methods'
+  comment [94] = '// Interface with generic methods'
   type_declaration [115] = 'type Container[T any] interface {'
     type [19] = 'type'
     type_spec [116] = 'Container[T any] interface {'
@@ -605,9 +605,9 @@ source_file [95]
             <- [29] = '<-'
             chan [28] = 'chan'
             value: type_identifier [218] = 'T'
-        comment [94] = '// Go channel as iterator'
+        comment [94] = '// Go channel as iterator'
         } [24] = '}'
-  comment [94] = '// Interface with context (lifetime equivalent)'
+  comment [94] = '// Interface with context (lifetime equivalent)'
   type_declaration [115] = 'type Lifecycle[T any] interface {'
     type [19] = 'type'
     type_spec [116] = 'Lifecycle[T any] interface {'
@@ -643,8 +643,8 @@ source_file [95]
       = [13] = '='
       value: expression_list [117] = '100'
         int_literal [86] = '100'
-  comment [94] = '// Implementation methods for Config'
-  comment [94] = '// Associated constant equivalent'
+  comment [94] = '// Implementation methods for Config'
+  comment [94] = '// Associated constant equivalent'
   const_declaration [102] = 'const DefaultPort uint16 = 8080'
     const [11] = 'const'
     const_spec [103] = 'DefaultPort uint16 = 8080'
@@ -653,7 +653,7 @@ source_file [95]
       = [13] = '='
       value: expression_list [117] = '8080'
         int_literal [86] = '8080'
-  comment [94] = '// Constructor (associated function)'
+  comment [94] = '// Constructor (associated function)'
   function_declaration [107] = 'func NewConfig(name string) *Config {'
     func [15] = 'func'
     name: identifier [1] = 'NewConfig'
@@ -716,7 +716,7 @@ source_file [95]
                   , [12] = ','
                   } [24] = '}'
       } [24] = '}'
-  comment [94] = '// Method with receiver'
+  comment [94] = '// Method with receiver'
   method_declaration [108] = 'func (c *Config) Port() uint16 {'
     func [15] = 'func'
     receiver: parameter_list [111] = '(c *Config)'
@@ -743,7 +743,7 @@ source_file [95]
               . [7] = '.'
               field: field_identifier [214] = 'port'
       } [24] = '}'
-  comment [94] = '// Method with mutable receiver'
+  comment [94] = '// Method with mutable receiver'
   method_declaration [108] = 'func (c *Config) SetPort(port uint16) {'
     func [15] = 'func'
     receiver: parameter_list [111] = '(c *Config)'
@@ -774,7 +774,7 @@ source_file [95]
           right: expression_list [117] = 'port'
             identifier [1] = 'port'
       } [24] = '}'
-  comment [94] = '// Method consuming self (takes ownership via value receiver)'
+  comment [94] = '// Method consuming self (takes ownership via value receiver)'
   method_declaration [108] = 'func (c Config) IntoName() string {'
     func [15] = 'func'
     receiver: parameter_list [111] = '(c Config)'
@@ -799,7 +799,7 @@ source_file [95]
               . [7] = '.'
               field: field_identifier [214] = 'Name'
       } [24] = '}'
-  comment [94] = '// Generic method'
+  comment [94] = '// Generic method'
   function_declaration [107]
     func [15] = 'func'
     name: identifier [1] = 'WithData'
@@ -834,7 +834,7 @@ source_file [95]
       ) [10] = ')'
     body: block [136] = '{'
       { [23] = '{'
-      comment [94] = '// Clone equivalent'
+      comment [94] = '// Clone equivalent'
       statement_list [137] = 'newConfig := *c'
         short_var_declaration [147] = 'newConfig := *c'
           left: expression_list [117] = 'newConfig'
@@ -853,7 +853,7 @@ source_file [95]
             , [12] = ','
             identifier [1] = 'data'
       } [24] = '}'
-  comment [94] = '// Async equivalent (using goroutines)'
+  comment [94] = '// Async equivalent (using goroutines)'
   method_declaration [108]
     func [15] = 'func'
     receiver: parameter_list [111] = '(c *Config)'
@@ -877,7 +877,7 @@ source_file [95]
     result: type_identifier [218] = 'error'
     body: block [136] = '{'
       { [23] = '{'
-      comment [94] = '// Simulate async operation'
+      comment [94] = '// Simulate async operation'
       statement_list [137] = 'go func() {'
         go_statement [155] = 'go func() {'
           go [50] = 'go'
@@ -915,7 +915,7 @@ source_file [95]
           expression_list [117] = 'nil'
             nil [90] = 'nil'
       } [24] = '}'
-  comment [94] = '// Unsafe method'
+  comment [94] = '// Unsafe method'
   method_declaration [108]
     func [15] = 'func'
     receiver: parameter_list [111] = '(c *Config)'
@@ -955,7 +955,7 @@ source_file [95]
                     field: field_identifier [214] = 'port'
                 ) [10] = ')'
       } [24] = '}'
-  comment [94] = '// Interface implementation'
+  comment [94] = '// Interface implementation'
   type_declaration [115] = 'type ConfigParser struct{}'
     type [19] = 'type'
     type_spec [116] = 'ConfigParser struct{}'
@@ -1065,7 +1065,7 @@ source_file [95]
                 { [23] = '{'
                 } [24] = '}'
       } [24] = '}'
-  comment [94] = '// Generic struct with constraints'
+  comment [94] = '// Generic struct with constraints'
   type_declaration [115]
     type [19] = 'type'
     type_spec [116]
@@ -1096,7 +1096,7 @@ source_file [95]
             name: field_identifier [214] = 'metadata'
             type: type_identifier [218] = 'U'
           } [24] = '}'
-  comment [94] = '// Constructor for generic struct'
+  comment [94] = '// Constructor for generic struct'
   function_declaration [107]
     func [15] = 'func'
     name: identifier [1] = 'NewGenericContainer'
@@ -1228,7 +1228,7 @@ source_file [95]
                 identifier [1] = 'item'
                 ) [10] = ')'
       } [24] = '}'
-  comment [94] = '// Container interface implementation'
+  comment [94] = '// Container interface implementation'
   method_declaration [108]
     func [15] = 'func'
     receiver: parameter_list [111] = '(gc *GenericContainer[T, U])'
@@ -1389,7 +1389,7 @@ source_file [95]
           expression_list [117] = 'ch'
             identifier [1] = 'ch'
       } [24] = '}'
-  comment [94] = '// Function with various parameter types'
+  comment [94] = '// Function with various parameter types'
   function_declaration [107]
     func [15] = 'func'
     name: identifier [1] = 'ComplexFunction'
@@ -1480,7 +1480,7 @@ source_file [95]
             , [12] = ','
             nil [90] = 'nil'
       } [24] = '}'
-  comment [94] = '// Async function equivalent'
+  comment [94] = '// Async function equivalent'
   function_declaration [107]
     func [15] = 'func'
     name: identifier [1] = 'AsyncOperation'
@@ -1550,7 +1550,7 @@ source_file [95]
                         ( [9] = '('
                         identifier [1] = 'result'
                         ) [10] = ')'
-                  comment [94] = '// Simulate async work'
+                  comment [94] = '// Simulate async work'
                   expression_statement [141] = 'time.Sleep(10 * time.Millisecond)'
                     call_expression [171] = 'time.Sleep(10 * time.Millisecond)'
                       function: selector_expression [175] = 'time.Sleep'
@@ -1603,7 +1603,7 @@ source_file [95]
           expression_list [117] = 'result'
             identifier [1] = 'result'
       } [24] = '}'
-  comment [94] = '// Const function equivalent (pure function)'
+  comment [94] = '// Const function equivalent (pure function)'
   function_declaration [107] = 'func ConstFunction(x uint32) uint32 {'
     func [15] = 'func'
     name: identifier [1] = 'ConstFunction'
@@ -1625,7 +1625,7 @@ source_file [95]
               operator: * [20] = '*'
               right: int_literal [86] = '2'
       } [24] = '}'
-  comment [94] = '// Unsafe function'
+  comment [94] = '// Unsafe function'
   function_declaration [107]
     func [15] = 'func'
     name: identifier [1] = 'UnsafeOperation'
@@ -1660,7 +1660,7 @@ source_file [95]
           right: expression_list [117] = '0'
             int_literal [86] = '0'
       } [24] = '}'
-  comment [94] = '// Function returning interface (equivalent to impl Trait)'
+  comment [94] = '// Function returning interface (equivalent to impl Trait)'
   function_declaration [107] = 'func ReturnsInterface() fmt.Stringer {'
     func [15] = 'func'
     name: identifier [1] = 'ReturnsInterface'
@@ -1728,7 +1728,7 @@ source_file [95]
               . [7] = '.'
               field: field_identifier [214] = 's'
       } [24] = '}'
-  comment [94] = '// Function taking interface parameter'
+  comment [94] = '// Function taking interface parameter'
   function_declaration [107]
     func [15] = 'func'
     name: identifier [1] = 'TakesDynInterface'
@@ -1751,9 +1751,9 @@ source_file [95]
       ) [10] = ')'
     body: block [136] = '{'
       { [23] = '{'
-      comment [94] = '// Implementation'
+      comment [94] = '// Implementation'
       } [24] = '}'
-  comment [94] = '// Higher-ranked trait bounds equivalent (using generics)'
+  comment [94] = '// Higher-ranked trait bounds equivalent (using generics)'
   function_declaration [107]
     func [15] = 'func'
     name: identifier [1] = 'HigherRanked'
@@ -1793,9 +1793,9 @@ source_file [95]
                 " [82] = '"'
               ) [10] = ')'
       } [24] = '}'
-  comment [94] = '// Code generation equivalent (Go generate, but showing pattern)'
-  comment [94] = '//go:generate go run generate_functions.go'
-  comment [94] = '// Generated function (would be generated by go generate)'
+  comment [94] = '// Code generation equivalent (Go generate, but showing pattern)'
+  comment [94] = '//go:generate go run generate_functions.go'
+  comment [94] = '// Generated function (would be generated by go generate)'
   function_declaration [107] = 'func GeneratedFunc() {'
     func [15] = 'func'
     name: identifier [1] = 'GeneratedFunc'
@@ -1825,7 +1825,7 @@ source_file [95]
                 " [82] = '"'
               ) [10] = ')'
       } [24] = '}'
-  comment [94] = '// Union equivalent (using unsafe and interface)'
+  comment [94] = '// Union equivalent (using unsafe and interface)'
   type_declaration [115] = 'type MyUnion interface {'
     type [19] = 'type'
     type_spec [116] = 'MyUnion interface {'
@@ -1891,7 +1891,7 @@ source_file [95]
     body: block [136] = '{}'
       { [23] = '{'
       } [24] = '}'
-  comment [94] = '// Extern equivalent (using CGO)'
+  comment [94] = '// Extern equivalent (using CGO)'
   comment [94] = '/*'
   import_declaration [97] = 'import "C"'
     import [6] = 'import'
@@ -1939,7 +1939,7 @@ source_file [95]
                     ) [10] = ')'
                 ) [10] = ')'
       } [24] = '}'
-  comment [94] = '// Error type'
+  comment [94] = '// Error type'
   type_declaration [115] = 'type CustomError struct {'
     type [19] = 'type'
     type_spec [116] = 'CustomError struct {'
@@ -1978,7 +1978,7 @@ source_file [95]
               . [7] = '.'
               field: field_identifier [214] = 'Message'
       } [24] = '}'
-  comment [94] = '// Test module equivalent'
+  comment [94] = '// Test module equivalent'
   function_declaration [107] = 'func TestConfig() error {'
     func [15] = 'func'
     name: identifier [1] = 'TestConfig'
@@ -2051,7 +2051,7 @@ source_file [95]
           expression_list [117] = 'nil'
             nil [90] = 'nil'
       } [24] = '}'
-  comment [94] = '// Benchmark equivalent'
+  comment [94] = '// Benchmark equivalent'
   function_declaration [107] = 'func BenchmarkCreate(b interface{ '
     func [15] = 'func'
     name: identifier [1] = 'BenchmarkCreate'
@@ -2124,7 +2124,7 @@ source_file [95]
                     ) [10] = ')'
             } [24] = '}'
       } [24] = '}'
-  comment [94] = '// Main function'
+  comment [94] = '// Main function'
   function_declaration [107] = 'func main() {'
     func [15] = 'func'
     name: identifier [1] = 'main'
@@ -2164,7 +2164,7 @@ source_file [95]
               , [12] = ','
               identifier [1] = 'config'
               ) [10] = ')'
-        comment [94] = '// Test various features'
+        comment [94] = '// Test various features'
         expression_statement [141] = 'fmt.Println("Testing Go features:")'
           call_expression [171] = 'fmt.Println("Testing Go features:")'
             function: selector_expression [175] = 'fmt.Println'
@@ -2178,7 +2178,7 @@ source_file [95]
                 interpreted_string_literal_content [83] = 'Testing Go features:'
                 " [82] = '"'
               ) [10] = ')'
-        comment [94] = '// Test generics'
+        comment [94] = '// Test generics'
         short_var_declaration [147]
           left: expression_list [117] = 'container'
             identifier [1] = 'container'
@@ -2207,7 +2207,7 @@ source_file [95]
               ( [9] = '('
               int_literal [86] = '42'
               ) [10] = ')'
-        comment [94] = '// Test channels/iteration'
+        comment [94] = '// Test channels/iteration'
         for_statement [158] = 'for item := range container.Iter() {'
           for [54] = 'for'
           range_clause [160] = 'item := range container.Iter()'
@@ -2244,9 +2244,9 @@ source_file [95]
                     ) [10] = ')'
               break_statement [151] = 'break'
                 break [46] = 'break'
-              comment [94] = '// Just test one item'
+              comment [94] = '// Just test one item'
             } [24] = '}'
-        comment [94] = '// Test async operation'
+        comment [94] = '// Test async operation'
         short_var_declaration [147] = 'ctx := context.Background()'
           left: expression_list [117] = 'ctx'
             identifier [1] = 'ctx'
@@ -2316,7 +2316,7 @@ source_file [95]
                       field: field_identifier [214] = 'Value'
                     ) [10] = ')'
             } [24] = '}'
-        comment [94] = '// Test interface'
+        comment [94] = '// Test interface'
         short_var_declaration [147] = 'stringer := ReturnsInterface()'
           left: expression_list [117] = 'stringer'
             identifier [1] = 'stringer'
@@ -2350,7 +2350,7 @@ source_file [95]
                   ( [9] = '('
                   ) [10] = ')'
               ) [10] = ')'
-        comment [94] = '// Test error handling'
+        comment [94] = '// Test error handling'
         if_statement [157] = 'if err := TestConfig(); err != nil {'
           if [52] = 'if'
           initializer: short_var_declaration [147] = 'err := TestConfig()'

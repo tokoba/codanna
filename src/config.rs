@@ -23,8 +23,8 @@
 //! // デフォルト設定を読み込む
 //! let settings = Settings::default();
 //!
-//! // 特定のパスから設定を読み込む
-//! let settings = Settings::from_workspace_root("/path/to/workspace")
+//! // 設定ファイルから読み込む
+//! let settings = Settings::load()
 //!     .expect("設定の読み込みに失敗しました");
 //! ```
 
@@ -166,10 +166,14 @@ pub struct IndexingConfig {
 ///
 /// ```
 /// use codanna::config::LanguageConfig;
+/// use std::collections::HashMap;
 ///
-/// let mut config = LanguageConfig::default();
-/// config.enabled = true;
-/// config.extensions = vec!["rs".to_string(), "rust".to_string()];
+/// let mut config = LanguageConfig {
+///     enabled: true,
+///     extensions: vec!["rs".to_string(), "rust".to_string()],
+///     parser_options: HashMap::new(),
+///     config_files: Vec::new(),
+/// };
 /// ```
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LanguageConfig {

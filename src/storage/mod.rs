@@ -16,7 +16,7 @@
 //! use std::path::Path;
 //!
 //! let path = Path::new(".codanna/index");
-//! let persistence = IndexPersistence::new(path);
+//! let persistence = IndexPersistence::new(path.to_path_buf());
 //! ```
 
 pub mod error;

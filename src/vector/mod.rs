@@ -19,9 +19,9 @@
 //! # 使用例
 //!
 //! ```no_run
-//! use codanna::vector::{VectorEngine, VectorStorage};
-//! // let engine = VectorEngine::new();
-//! // let results = engine.search(query_vector, top_k);
+//! use codanna::vector::{VectorSearchEngine, MmapVectorStorage};
+//! // let storage = MmapVectorStorage::new(path);
+//! // let engine = VectorSearchEngine::new(storage);
 //! ```
 
 mod clustering;
