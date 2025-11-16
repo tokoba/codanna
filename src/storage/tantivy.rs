@@ -26,6 +26,108 @@ use tantivy::{
     tokenizer::{NgramTokenizer, TextAnalyzer},
 };
 
+// ============================================================================
+// Phase 0: Observation Helper Functions (Section 11.7.1)
+// ============================================================================
+// These functions support detailed error observation without changing behavior.
+// Logs are emitted only when debug_enabled() returns true.
+
+/// Check if debug logging is enabled
+/// Returns true if debug build or CODANNA_DEBUG environment variable is set
+fn debug_enabled() -> bool {
+    cfg!(debug_assertions) || std::env::var("CODANNA_DEBUG").is_ok()
+}
+
+/// Windows error code name resolution
+#[cfg(target_os = "windows")]
+fn win_error_name(code: i32) -> &'static str {
+    match code {
+        2 => "ERROR_FILE_NOT_FOUND",
+        3 => "ERROR_PATH_NOT_FOUND",
+        5 => "ERROR_ACCESS_DENIED",
+        32 => "ERROR_SHARING_VIOLATION",
+        33 => "ERROR_LOCK_VIOLATION",
+        50 => "ERROR_NOT_SUPPORTED",
+        80 => "ERROR_FILE_EXISTS",
+        82 => "ERROR_CANNOT_MAKE",
+        145 => "ERROR_DIR_NOT_EMPTY",
+        170 => "ERROR_BUSY",
+        183 => "ERROR_ALREADY_EXISTS",
+        303 => "ERROR_DELETE_PENDING",
+        995 => "ERROR_OPERATION_ABORTED",
+        997 => "ERROR_IO_PENDING",
+        1224 => "ERROR_USER_MAPPED_FILE",
+        1314 => "ERROR_PRIVILEGE_NOT_HELD",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Format tantivy error with full error chain details for observation
+/// This function does not change behavior - it only formats error information
+/// for Phase 0 observation logging.
+pub(crate) fn format_tantivy_error(err: &tantivy::TantivyError) -> String {
+    let debug_variant = format!("{:?}", err);
+    let mut out = String::new();
+    out.push_str(&format!("TantivyError(display): {}\n", err));
+    out.push_str(&format!("TantivyError(debug): {}\n", debug_variant));
+
+    let mut depth = 0;
+    let mut src = std::error::Error::source(err);
+    while let Some(e) = src {
+        out.push_str(&format!("  cause[{}]: {}\n", depth, e));
+        
+        if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+            out.push_str(&format!("    io::ErrorKind: {:?}\n", ioe.kind()));
+            if let Some(code) = ioe.raw_os_error() {
+                #[cfg(target_os = "windows")]
+                {
+                    out.push_str(&format!(
+                        "    raw_os_error: {} ({})\n",
+                        code,
+                        win_error_name(code)
+                    ));
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    out.push_str(&format!("    raw_os_error: {}\n", code));
+                }
+            }
+        } else {
+            out.push_str(&format!(
+                "    cause_type: {}\n",
+                std::any::type_name_of_val(e)
+            ));
+        }
+        depth += 1;
+        src = e.source();
+    }
+    out
+}
+
+/// Extract Windows error code from tantivy error (for test/observation use)
+#[cfg(target_os = "windows")]
+pub(crate) fn extract_windows_error_code(err: &tantivy::TantivyError) -> Option<i32> {
+    let mut src = std::error::Error::source(err);
+    while let Some(e) = src {
+        if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+            if let Some(code) = ioe.raw_os_error() {
+                return Some(code);
+            }
+        }
+        src = e.source();
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn extract_windows_error_code(_err: &tantivy::TantivyError) -> Option<i32> {
+    None
+}
+
+// ============================================================================
+// End of Phase 0 Observation Helper Functions
+// ============================================================================
+
 /// Schema fields for the document index
 #[derive(Debug)]
 pub struct IndexSchema {
@@ -527,6 +629,21 @@ impl DocumentIndex {
                         );
                         std::thread::sleep(std::time::Duration::from_millis(delay));
                     } else {
+                        // Phase 0: Observation logging (Section 11.7.1)
+                        // This log does not change behavior - only observes error details
+                        if debug_enabled() {
+                            let details = format_tantivy_error(&e);
+                            let code = extract_windows_error_code(&e);
+                            eprintln!(
+                                "(Phase0) op=create_writer index={} heap_mb={} attempt={}/{} windows_code={:?}\n{}",
+                                self.index_path.display(),
+                                self.heap_size / 1_000_000,
+                                attempt + 1,
+                                self.max_retry_attempts,
+                                code,
+                                details
+                            );
+                        }
                         return Err(e);
                     }
                 }
@@ -1011,6 +1128,21 @@ impl DocumentIndex {
                             - Ensuring no other codanna processes are running"
                         )));
                     }
+                    
+                    // Phase 0: Observation logging (Section 11.7.1)
+                    // This log does not change behavior - only observes error details
+                    if debug_enabled() {
+                        let details = format_tantivy_error(&e);
+                        let code = extract_windows_error_code(&e);
+                        eprintln!(
+                            "(Phase0) op=commit index={} heap_mb={} windows_code={:?}\n{}",
+                            self.index_path.display(),
+                            self.heap_size / 1_000_000,
+                            code,
+                            details
+                        );
+                    }
+                    
                     return Err(e.into());
                 }
             }
