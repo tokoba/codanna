@@ -556,7 +556,7 @@ impl DocumentIndex {
 
         // Extract and validate heap size
         let heap_size = settings.indexing.tantivy_heap_mb * 1_000_000;
-        let heap_size = heap_size.clamp(10_000_000, 1_000_000_000); // 10MB-1GB
+        let heap_size = normalized_heap_bytes(heap_size); // 15MB-2GB (Phase 1: Section 11.7.2.2)
 
         let max_retry_attempts = settings.indexing.max_retry_attempts;
 
@@ -988,23 +988,34 @@ impl DocumentIndex {
 
     /// Start a batch operation for adding multiple documents
     pub fn start_batch(&self) -> StorageResult<()> {
-        let mut writer_lock = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
-        if writer_lock.is_none() {
+        // まずロックを取得して状態チェック
+        let needs_writer = {
+            let writer_lock = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
+            writer_lock.is_none()
+        }; // ここでロック解放
+
+        if needs_writer {
+            // ロック外でwriter作成（リトライ処理中に他スレッドをブロックしない）
             let writer = self.create_writer_with_retry()?;
-            *writer_lock = Some(writer);
+            
+            // 再度ロック取得してwriter格納
+            let mut writer_lock = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
+            if writer_lock.is_none() {
+                *writer_lock = Some(writer);
 
-            // Initialize the pending symbol counter for this batch
-            let current = self
-                .query_metadata(MetadataKey::SymbolCounter)?
-                .unwrap_or(0) as u32;
-            if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
-                *pending_guard = Some(current + 1);
-            }
+                // Initialize the pending symbol counter for this batch
+                let current = self
+                    .query_metadata(MetadataKey::SymbolCounter)?
+                    .unwrap_or(0) as u32;
+                if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+                    *pending_guard = Some(current + 1);
+                }
 
-            // Initialize the pending file counter for this batch
-            let file_current = self.query_metadata(MetadataKey::FileCounter)?.unwrap_or(0) as u32;
-            if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
-                *pending_guard = Some(file_current + 1);
+                // Initialize the pending file counter for this batch
+                let file_current = self.query_metadata(MetadataKey::FileCounter)?.unwrap_or(0) as u32;
+                if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
+                    *pending_guard = Some(file_current + 1);
+                }
             }
         }
         Ok(())
@@ -1238,7 +1249,8 @@ impl DocumentIndex {
         } else {
             // Create temporary writer for single operation
             drop(writer_lock); // Release lock before creating new writer
-            let mut writer = self.index.writer::<Document>(50_000_000)?;
+            let heap = normalized_heap_bytes(self.heap_size);
+            let mut writer = self.index.writer::<Document>(heap)?;
             writer.delete_term(term);
             writer.commit()?;
             self.reader.reload()?;
@@ -1477,7 +1489,8 @@ impl DocumentIndex {
             return Ok(());
         }
 
-        let mut writer = self.index.writer::<Document>(50_000_000)?;
+        let heap = normalized_heap_bytes(self.heap_size);
+        let mut writer = self.index.writer::<Document>(heap)?;
         writer.delete_all_documents()?;
         writer.commit()?;
         self.reader.reload()?;

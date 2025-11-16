@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(if [ -f phase0_final_2.log ])",
+      "Bash(then tail -200 phase0_final_2.log)",
+      "Bash(else echo \"Log file not found\")",
+      "Bash(fi)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
