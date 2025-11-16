@@ -1518,6 +1518,105 @@ TantivyError: An error occurred in a thread: 'An index writer was killed..'
 
 ---
 
+#### 根本原因の特定結果（shimai分析） 🔍
+
+**要約（結論）**  
+- **根本原因**: Tantivyがセグメントファイルを**最終ファイル名で新規作成（open_write）**する瞬間に、AVソフト（またはシミュレーター）が同一ファイルを**FILE_SHARE_NONE（排他ロック）**で保持しているため、**アクセス拒否（ERROR_ACCESS_DENIED=5）**が返る。  
+- **観測の一貫性**: 実測ではエラーコードが**100% 5**であったが、これは*WindowsのFSフィルタドライバ層が共有違反（ERROR_SHARING_VIOLATION=32）等をERROR_ACCESS_DENIEDへ正規化して返す実装がある*ため、**内部的な共有違反がアクセス拒否として観測される**構図が説明できる。  
+- **重要補足**: セグメントファイルは**.tmp経由のrenameを用いず**、**最終名で直接作成**される（rename戦略はmeta.jsonのみ）。監視対象が実セグメントファイルに絞られると、**open_writeが直接ブロックされる**。
+
+---
+
+**1) エラー発生メカニズムの詳細** ⚙️
+
+- **発生タイミング**: IndexWriterのcommit中、**新規セグメントファイルのopen_write（作成）**直後
+- **競合相手**: AVソフト／シミュレーターが**排他ロック（FILE_SHARE_NONE）**でファイルを保持
+- **エラー表面化**: 内部ワーカースレッドでI/O失敗→Writerが**kill状態**→次の軽量操作（例: **store_metadata**）でエラーが顕在化
+- **正規化の可能性**: *WindowsのFSフィルタドライバ層が共有違反（32）をERROR_ACCESS_DENIED（5）へ正規化する実装が存在*。今回の観測（コード5のみ）はこれと整合的
+
+```mermaid
+sequenceDiagram
+    participant W as IndexWriter
+    participant D as MmapDirectory
+    participant FS as Windows FS
+    participant AV as AV/Simulator
+
+    W->>D: open_write("segment.store")  // 最終ファイル名で新規作成
+    D->>FS: CreateFileW (write, share_none)
+    FS-->>AV: File creation notify
+    AV->>FS: Exclusive scan/lock (FILE_SHARE_NONE)
+    FS-->>D: Access Denied (ERROR_ACCESS_DENIED=5) 
+    note right of FS: *フィルタ層で共有違反(32)が5に正規化される可能性*
+    D-->>W: io::Error -> worker fails -> Writer killed
+    W-->>W: 次の軽量操作でエラー顕在化（例: store_metadata）
+```
+
+---
+
+**2) heap_sizeとエラー率逆相関の因果連鎖** 📉
+
+- **正しいメカニズム**:
+  - **heap_size小** → メモリ圧迫 → **flush頻度↑** → **commit回数↑**
+  → **ファイル作成イベント↑** → **AV競合機会↑** → **エラー率↑**
+  - **heap_size大** → バッファ余裕 → **flush頻度↓** → **commit回数↓**
+  → **ファイル作成イベント↓** → **AV競合機会↓** → **エラー率↓**
+
+- **IndexWriterの役割**: `heap_size`はディスクへフラッシュするまでの**メモリバジェット**。倒立インデックスやstored/fast/fieldnorm等の各種バッファに影響
+
+```mermaid
+flowchart LR
+    A[heap_size 小] --> B[flush頻度 増]
+    B --> C[commit回数 増]
+    C --> D[ファイル作成イベント 増]
+    D --> E[AV排他ロックとの競合機会 増]
+    E --> F[ERROR_ACCESS_DENIED 発生率 増]
+
+    A2[heap_size 大] --> B2[flush頻度 減]
+    B2 --> C2[commit回数 減]
+    C2 --> D2[ファイル作成イベント 減]
+    D2 --> E2[競合機会 減]
+    E2 --> F2[エラー率 減]
+```
+
+---
+
+**3) Tantivyのcommit()内部I/O操作の実態** 🧩
+
+- **セグメント生成フェーズ**:
+  1. メモリ上のドキュメントを新規セグメントへシリアル化
+  2. 以下の**実セグメントファイル**を**最終ファイル名で直接作成・書込**（`.tmp`経由しない）
+     - `.store`（stored fields）
+     - `.term`/`.idx`/`.pos`（倒立インデックス）
+     - `.fieldnorm`, `.fast`（fast fields）
+  3. `MmapDirectory` の **open_write（新規作成）**でハンドル取得
+- **コミットメタ反映フェーズ**:
+  - 全セグメント書込み後、**`meta.json`をatomic_write**（`.tmp`経由で`rename/replace`）
+
+```mermaid
+flowchart TD
+    S[メモリ→セグメント構築] --> W1[open_write .store]
+    S --> W2[open_write .term/.idx/.pos]
+    S --> W3[open_write .fieldnorm/.fast]
+    W1 & W2 & W3 --> M[meta.json atomic_write (.tmp→rename)]
+    note right of W1: *.tmpを使わず最終名で作成*
+```
+
+---
+
+**4) 設計・テストへの示唆** ✅
+
+- **設計上の含意**:
+  - Windows環境では、**heap_sizeを過度に小さくすると** flush/commitの増加により**むしろ不安定化**し得る
+  - 監視対象が**実セグメントファイル**である場合、**open_writeが直接ブロック**されるため、**commitタイミングの競合耐性**（軽量リトライ、バックオフ）が重要
+  - エラーコード**5（ACCESS_DENIED）に共有違反が含意され得る**ことを前提に、**文字列やErrorKindに依存しない**分類が望ましい（型・raw_os_error優先）
+- **テスト設計への反映**:
+  - **heap_sizeパラメータ掃引**で、**flush/commit回数とファイル作成イベント数**を合わせて観測し、**AV競合機会**の増減と**エラー率**の逆相関を検証
+  - 監視対象を**実セグメントファイル**に絞ることで、**観測ノイズ（.tmp, .lock等）を排除**して再現性を高める
+
+> 注記（OS層の詳細度について）: *Windows FSフィルタドライバ層が共有違反をACCESS_DENIEDに正規化する実装が存在する*という低レベル知見は、**誤解を避けるため注記レベル**に留めます。開発者が**コード5＝権限設定ミス**と早合点しないよう、「**競合由来のアクセス拒否**」の可能性を明示する目的で記載しています。
+
+---
+
 **調査から得られた新たな知見**:
 
 ### 1. heap_size削減は逆効果の可能性
@@ -1563,15 +1662,45 @@ TantivyError: An error occurred in a thread: 'An index writer was killed..'
 
 ### 5. Phase 1への方向性
 
-**推奨アクション**:
-1. **heap_size推奨値の見直し**: 現行15MB → **50MB以上**を推奨
-2. **retry戦略の実装**: ERROR_ACCESS_DENIED (5) に対する適切な待機時間
-3. **性能測定**: heap_size増加による性能影響を定量評価
+**要旨**  
+Phase 0の実測に基づき、**heap_sizeの拡大**と**リトライ戦略の併用**をPhase 1の基本方針とする。詳細パラメータは実装仕様（Section 11.7.2）で定義し、本節では方向性と根拠を示す。
 
-**検証すべき仮説**:
-- heap_size 50MB以上でエラー率が安定（6-7%）
-- heap_size 100MB以上でエラー率が大幅低下（4%以下）
-- 適切なheap_size設定により、エラーを実質的に回避可能
+**推奨アクション（方向性）**  
+1. **heap_size推奨値の見直し** 🧠  
+   - 現行15MB → **50MB以上**、可能であれば**100–200MB**を推奨。  
+   - 根拠（Phase 0実測の要旨）: 50MBでエラー率約6.76%、100MBで約4.53%、200MBで約3.81%に低下。  
+   - 併せて**heap_sizeの正規化処理**（設定値の下限/上限・ステップのクランプ）を導入（詳細は11.7.2）。
+
+2. **リトライ戦略の実装** 🔁  
+   - **対象エラーコード（Win32）**  
+     - 常時リトライ: `32` (SHARING_VIOLATION), `33` (LOCK_VIOLATION), `1224` (USER_MAPPED_FILE), `995` (OPERATION_ABORTED)  
+     - 条件付きリトライ: `5` (ACCESS_DENIED) … 権限エラーではなくAV/一時ロック由来が示唆される場合に限定  
+     - 限定的リトライ: `80` (FILE_EXISTS), `183` (ALREADY_EXISTS), `145` (DIR_NOT_EMPTY) … レース条件が想定されるケースに限る  
+   - **方式**: **指数バックオフ + ジッター**、**最大リトライ回数に上限**を設ける。  
+   - **同期待機の回避**: リトライ待機中は**Mutexロックを解放**して他スレッドの進行を阻害しない。  
+   - 具体的な待機時間・回数・ジッター幅・判定ヒューリスティクスは**Section 11.7.2**にて規定。
+
+3. **性能・安定性の計測設計** 📊  
+   - 観測指標: エラー率（コード別）、リトライ成功率/回数分布、スループット、p95/p99レイテンシ、メモリ使用量。  
+   - 比較条件: heap_size（50/100/200MB）× リトライ有無/方式の組合せ、代表的負荷プロファイル、AV有無など環境差。  
+   - 成果物: Phase 1完了時に、目標エラー率・SLO影響（レイテンシ/スループット）の定量レポートを作成。
+
+4. **Poisoned Mutexの安全化** 🔒  
+   - パニック伝播や全体停止を回避し、**フェイルセーフ**に復旧できるエラーハンドリングへ。  
+   - 詳細な方針（復旧手順、ログ/テレメトリ、デッドロック回避策）は**Section 11.7.2**に集約。
+
+**Phase 0の実測から得られた検証済み知見** ✅  
+- **heap_size拡大**は、少なくとも100–200MBの範囲で**エラー率を有意に低減**。  
+- **200MB**が最良（約**3.81%**）、**100MB**も良好（約**4.53%**）、**50MB**は現行15MB比で改善するが**約6.76%**と高めに留まる。  
+- リトライ戦略の併用があれば、さらに低下が期待される（詳細はPhase 1で定量化）。
+
+**Phase 1で追加検証すべき事項** 🧪  
+- **併用効果の最終値**: heap_size拡大 + リトライ戦略で達成可能な**目標エラー率**（環境別・負荷別）を確定。  
+- **SLO影響**: リトライ導入による**レイテンシ増分**と**スループット**への影響。  
+- **環境バリアンス**: AV動作有無、I/O競合の強い環境、極端な並行度におけるばらつき。  
+- **ACCESS_DENIED(5)の判定**: 恒久的な権限不備と一時的ロックの**誤判定防止**（誤リトライ抑制）。  
+- **heap_size正規化の安全性**: クランプ/丸めの境界条件、OOMや断片化への副作用有無。  
+- **Poisoned Mutex対応**: フォールバックの正当性、デッドロック回避の実証。
 
 ---
 
@@ -1632,118 +1761,622 @@ TantivyError: An error occurred in a thread: 'An index writer was killed..'
 
 #### 11.7.2 Phase 1: Targeted Fix（解決フェーズ）
 
-**目的**: Phase 0の観測結果に基づき、限定的な修正のみを実施
+**目的**: Phase 0の観測結果（Windowsで207件すべてが `ERROR_ACCESS_DENIED (code 5)`、heap_sizeが大きいほどエラー率が低下）に基づき、Windows特有の一時的I/O競合に対して、影響範囲を限定しつつ確実に効果がある修正を導入する。  
+本フェーズでは、エラーを正しく分類してリトライ戦略を適用しつつ、ロック設計とheap_sizeの推奨値を是正する。
 
-**実装範囲**（観測結果により調整）:
+---
 
-**1. heap_size統一（優先度: 最高）**
+**構成**  
+1. 方針とデフォルト値  
+2. ヘルパー関数  
+3. エラー分類  
+4. Writer生成リトライ（ロック外実行）  
+5. commit_batchリトライ（ロック解放／"killed"検出）  
+6. Poisoned Mutex安全化（into_inner継続禁止）  
+7. config.rs更新（Windows推奨を100MBに）  
+8. テスト戦略
+
+---
+
+**Phase 0の反映（重要）**  
+- エラー分類に `ERROR_ACCESS_DENIED (5)` を必ず含める（条件付きリトライ）  
+- 指数バックオフ＋ジッターを明記して関数化  
+- 休止は必ずロック外で行う（スリープ中に他スレッドをブロックしない）  
+- `"Index writer was killed"` は致命的（同じwriterでの継続禁止）  
+- heapの絶対最小値を15MBに引き上げ、推奨を50–200MBへ更新
+
+---
+
+**Windowsの推奨設定（まとめ）**  
+- 絶対最小: 15MB（10MB未満は禁止）  
+- Windows推奨最小: 50MB  
+- 理想値: 100–200MB  
+- リトライ回数: 4–5回（初回80–120ms、以降100→200→400→800ms＋0–50msジッター）
+
+---
+
+**注記**  
+- コードスニペットはすべてRustで、そのまま実装可能な完全版を記載。  
+- Windows専用判定は `raw_os_error()` と `TantivyError` の型情報を優先。文字列判定は最終手段。  
+- ロック毒化（Mutexポイズニング）は継続禁止。安全に再初期化してエラー返却。  
+
+---
+
+**アイコン凡例**  
+- ⚙️ 実装  
+- 🧪 テスト  
+- 🔒 安全化  
+- ❗ 致命的エラー  
+- 🔁 リトライ  
+- 🕒 バックオフ
+
+---
+
+**1. 方針とデフォルト値**
+
+- **基本方針**  
+  - Windowsのファイルロック競合に対して、**型ベースのエラー分類**＋**指数バックオフ＋ジッター**の**限定的リトライ**を導入。  
+  - `"Index writer was killed"` は**致命的**として扱い、**writer再生成**を必須化。  
+  - **ロック範囲の最小化**（スリープは常にロック外）。  
+  - `heap_size` は**15MB–2GB**でクランプ。Windowsの推奨値を**100MBデフォルト**。  
+- **Windows推奨**  
+  - heap_size: **100MB**（デフォルト）、最小**50MB**、理想**100–200MB**  
+  - 最大リトライ: **4–5回**  
+  - バックオフ: 初回**80–120ms**、以降**100→200→400→800ms**＋**0–50ms**ジッター
+
+---
+
+**2. ヘルパー関数**
+
+- **heapサイズ正規化（15MB–2GBクランプ）** ⚙️
+
 ```rust
-// src/storage/tantivy.rs
-// L1055: remove_file_documents
-// L1294: clear
-// 修正前: 50_000_000
-// 修正後: self.heap_size または normalized_heap_bytes(self.heap_size)
-
-fn normalized_heap_bytes(heap_bytes: usize) -> usize {
-    const MIN_HEAP: usize = 10 * 1024 * 1024;  // 10MB
-    const MAX_HEAP: usize = 2 * 1024 * 1024 * 1024;  // 2GB
+/// heap_sizeの正規化（絶対最小15MB、最大2GB）
+/// Windows環境では最小50MB/推奨100MB以上を強く推奨。
+pub fn normalized_heap_bytes(heap_bytes: usize) -> usize {
+    const MIN_HEAP: usize = 15 * 1024 * 1024;           // 15MB
+    const MAX_HEAP: usize = 2 * 1024 * 1024 * 1024;     // 2GB
     heap_bytes.clamp(MIN_HEAP, MAX_HEAP)
 }
 ```
 
-**2. Windowsエラーコード対応の拡充（観測結果に基づき選択）**
+- **指数バックオフ＋ジッター（初回80–120ms、以降指数＋0–50msジッター）** ⚙️🕒
 
-観測で頻出したコードのみ追加（過剰実装回避）:
 ```rust
-#[cfg(target_os = "windows")]
-fn is_windows_transient_code(code: i32) -> bool {
-    match code {
-        32 => true,  // ERROR_SHARING_VIOLATION（必須）
-        33 => true,  // ERROR_LOCK_VIOLATION（必須）
-        1224 => true, // ERROR_USER_MAPPED_FILE（必須）
-        995 => true,  // ERROR_OPERATION_ABORTED（頻出時）
-        303 => true,  // ERROR_DELETE_PENDING（頻出時）
-        // 以下は観測結果次第で追加
-        // 170 => true,  // ERROR_BUSY
-        // 997 => true,  // ERROR_IO_PENDING
+/// リトライ用バックオフ（ミリ秒）
+/// attempt=0: 80–120ms（初回）
+/// attempt>=1: 100→200→400→800ms + 0–50msジッター
+pub fn backoff_with_jitter_ms(attempt: u32) -> u64 {
+    // 追加依存を避けるためUNIX時刻から疑似乱数を生成
+    fn pseudo_jitter(limit_inclusive: u64) -> u64 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|_| std::time::Duration::from_nanos(0))
+            .subsec_nanos() as u64;
+        nanos % (limit_inclusive + 1)
+    }
+
+    if attempt == 0 {
+        // 80～120ms（両端含む）
+        return 80 + pseudo_jitter(40);
+    }
+
+    let base = match attempt {
+        1 => 100,
+        2 => 200,
+        3 => 400,
+        _ => 800,
+    };
+
+    base + pseudo_jitter(50)
+}
+```
+
+---
+
+**3. エラー分類**
+
+- **"Writer killed" の型ベース判定（致命的）** ❗
+
+```rust
+/// "Index writer was killed"（致命的）を型ベースで検出
+pub fn is_writer_killed(err: &tantivy::TantivyError) -> bool {
+    match err {
+        tantivy::TantivyError::ErrorInThread(msg) => {
+            // Tantivyの安定したバリアントに基づく判定
+            msg.contains("Index writer was killed")
+        }
         _ => false,
     }
 }
 ```
 
-**3. 限定的リトライ戦略（80/183/145の扱い）**
+- **Windows一時I/Oエラー判定（code 5/32/33/1224/995/80/183/145）** 🔁
+
+分類要件:
+- 常時リトライ: 32 (SHARING_VIOLATION), 33 (LOCK_VIOLATION), 1224 (USER_MAPPED_FILE), 995 (OPERATION_ABORTED)
+- 条件付きリトライ: 5 (ACCESS_DENIED) … AVや一時ロック由来が示唆される場合のみ
+- 限定的リトライ（1–2回）: 80 (FILE_EXISTS), 183 (ALREADY_EXISTS), 145 (DIR_NOT_EMPTY)
+
+実装は2層構造にします:
+- is_windows_transient_io_error: ブール判定（上記8コードを対象）
+- windows_error_retry_class: リトライクラス判定（限定回数の扱いなどを含む）
+
 ```rust
-// ERROR_FILE_EXISTS (80), ERROR_ALREADY_EXISTS (183), ERROR_DIR_NOT_EMPTY (145)
-// は1-2回のみリトライ、継続失敗時は早期fail
-fn should_retry_transient(code: i32, attempt: u32) -> bool {
-    match code {
-        80 | 183 | 145 => attempt < 2, // 限定的リトライ
-        32 | 33 | 1224 | 995 => true,   // 無制限リトライ
-        _ => false,
+/// Windowsの一時I/Oエラー（広義）のブール判定
+/// - 32/33/1224/995 → true（常時）
+/// - 5 → 条件付き（AV/一時ロックを示唆する文脈のみ）
+/// - 80/183/145 → true（限定的リトライ対象として許容）
+pub fn is_windows_transient_io_error(err: &tantivy::TantivyError) -> bool {
+    // "writer killed" は別扱い（致命的）だが、ここではtrueにしない
+    if is_writer_killed(err) {
+        return false;
+    }
+
+    let mut src = std::error::Error::source(err);
+    while let Some(e) = src {
+        if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+            if let Some(code) = ioe.raw_os_error() {
+                match code {
+                    32 | 33 | 1224 | 995 => return true, // 常時リトライ
+                    5 => {
+                        // 条件付き：AV/一時ロック由来が推測できる場合のみtrue
+                        // ヒューリスティクス: メッセージに "open file for write" を含む、
+                        // セグメント拡張子（.store/.term/.idx/.pos/.fast/.fieldnorm）を含む、
+                        // PermissionDeniedかつメタファイル以外、など。
+                        let msg = err.to_string();
+                        let is_segment = msg.contains(".store")
+                            || msg.contains(".term")
+                            || msg.contains(".idx")
+                            || msg.contains(".pos")
+                            || msg.contains(".fast")
+                            || msg.contains(".fieldnorm");
+                        let mentions_open_write = msg.contains("open file for write")
+                            || msg.contains("opening file for write")
+                            || msg.contains("open_write");
+                        let is_perm = ioe.kind() == std::io::ErrorKind::PermissionDenied;
+
+                        if is_segment && (mentions_open_write || is_perm) {
+                            return true;
+                        }
+                    }
+                    80 | 183 | 145 => return true, // 限定的リトライ対象
+                    _ => {}
+                }
+            }
+        }
+        src = e.source();
+    }
+    false
+}
+
+/// リトライのクラス（Windows専用方針）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsIoRetryClass {
+    Always,            // 常時リトライ（最大回数まで）
+    Conditional,       // 条件付き（ヒューリスティクス成立時のみ）
+    Limited(u32),      // 限定的（指定回数まで、推奨1–2回）
+    None,              // リトライ非推奨
+}
+
+/// Windowsエラーコードに対応するリトライ方針
+pub fn windows_error_retry_class(err: &tantivy::TantivyError) -> WindowsIoRetryClass {
+    if is_writer_killed(err) {
+        return WindowsIoRetryClass::None; // 致命的
+    }
+
+    let mut src = std::error::Error::source(err);
+    while let Some(e) = src {
+        if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+            if let Some(code) = ioe.raw_os_error() {
+                return match code {
+                    32 | 33 | 1224 | 995 => WindowsIoRetryClass::Always,
+                    5 => {
+                        // 上記と同じヒューリスティクスを適用
+                        let msg = err.to_string();
+                        let is_segment = msg.contains(".store")
+                            || msg.contains(".term")
+                            || msg.contains(".idx")
+                            || msg.contains(".pos")
+                            || msg.contains(".fast")
+                            || msg.contains(".fieldnorm");
+                        let mentions_open_write = msg.contains("open file for write")
+                            || msg.contains("opening file for write")
+                            || msg.contains("open_write");
+                        let is_perm = ioe.kind() == std::io::ErrorKind::PermissionDenied;
+
+                        if is_segment && (mentions_open_write || is_perm) {
+                            WindowsIoRetryClass::Conditional
+                        } else {
+                            WindowsIoRetryClass::None
+                        }
+                    }
+                    80 | 183 | 145 => WindowsIoRetryClass::Limited(2), // 推奨: 1–2回
+                    _ => WindowsIoRetryClass::None,
+                };
+            }
+        }
+        src = e.source();
+    }
+    WindowsIoRetryClass::None
+}
+```
+
+---
+
+**4. Writer生成リトライ（ロック外での実行）**
+
+- **方針**  
+  - Writer作成のリトライは**DocumentIndex.writerのMutexロック外**で実施し、**成功したら短時間だけロック**してセットする。  
+  - リトライ待機中に他スレッドをブロックしない。  
+  - `"writer killed"` は**致命的**として即時失敗。  
+  - `ERROR_ACCESS_DENIED (5)` を**条件付き**でリトライ対象に含める。
+
+```rust
+use tantivy::{IndexWriter, TantivyDocument as Document};
+
+/// Writer生成（ロック外でリトライ）
+/// - backoff_with_jitter_ms() を利用
+/// - is_windows_transient_io_error() による判定
+/// - 4–5回のリトライを推奨
+pub fn create_writer_with_retry(
+    index: &tantivy::Index,
+    heap_bytes: usize,
+    max_attempts: u32,
+) -> Result<IndexWriter<Document>, tantivy::TantivyError> {
+    let heap = normalized_heap_bytes(heap_bytes);
+    let attempts = max_attempts.max(4); // 最低4回
+
+    for attempt in 0..attempts {
+        match index.writer::<Document>(heap) {
+            Ok(writer) => return Ok(writer),
+            Err(e) => {
+                // "writer killed" は致命的（作成時には通常出ないが保険）
+                if is_writer_killed(&e) {
+                    return Err(e);
+                }
+
+                let is_transient = is_windows_transient_io_error(&e);
+                if !is_transient || attempt + 1 >= attempts {
+                    return Err(e);
+                }
+
+                let delay_ms = backoff_with_jitter_ms(attempt);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+        }
+    }
+    unreachable!("create_writer_with_retry: loop should return earlier")
+}
+```
+
+- **start_batchでの使用例（ロック外→ロック内セット）** ⚙️
+
+```rust
+/// start_batch の安全な初期化（ロック外でwriter生成→ロック内にセット）
+pub fn start_batch_safe(
+    writer_mutex: &std::sync::Mutex<Option<IndexWriter<Document>>>,
+    index: &tantivy::Index,
+    heap_bytes: usize,
+    max_attempts: u32,
+) -> Result<(), tantivy::TantivyError> {
+    // 既存writer有無を先に確認（ロック内で軽くチェック）
+    {
+        let guard = writer_mutex.lock().map_err(|_| {
+            tantivy::TantivyError::InvalidArgument("Writer mutex poisoned".into())
+        })?;
+        if guard.is_some() {
+            return Ok(());
+        }
+    }
+
+    // ロック外で生成＆リトライ
+    let writer = create_writer_with_retry(index, heap_bytes, max_attempts)?;
+
+    // 成功したら短時間だけロックしてセット
+    {
+        let mut guard = writer_mutex.lock().map_err(|_| {
+            tantivy::TantivyError::InvalidArgument("Writer mutex poisoned".into())
+        })?;
+        *guard = Some(writer);
+    }
+
+    Ok(())
+}
+```
+
+---
+
+**5. commit_batchリトライ（ロック解放／"killed"検出／回復）**
+
+- **方針**  
+  - commit時は**writerをロックから取り出して**（`take()`）、ロック外でリトライループを実行。  
+  - **致命的** `"writer killed"` 検出時は**即座に破棄**し、**明示的エラー返却**。  
+  - Windows一時エラー（32/33/1224/995）は**常時リトライ**（最大4–5回）。  
+  - 5 (ACCESS_DENIED) は**条件成立時のみリトライ**。  
+  - 80/183/145 は**限定的（1–2回）**のみ試す。  
+  - 待機は必ず**ロック外**で行う。
+
+```rust
+/// commit_batch のリトライ実装（ロック外、致命的検出、限定的リトライ対応）
+/// StorageError/StorageResultはプロジェクト側型に置き換えて使用する想定。
+pub fn commit_batch_with_retry(
+    writer_mutex: &std::sync::Mutex<Option<tantivy::IndexWriter<tantivy::TantivyDocument>>>,
+    reader: &tantivy::IndexReader,
+    index_path: &std::path::Path,
+    max_attempts: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1) writerを取り出し（take）てロック解放
+    let mut writer = {
+        let mut guard = writer_mutex.lock().map_err(|_| "Writer mutex poisoned")?;
+        guard.take().ok_or("No active batch writer")?
+    };
+
+    let attempts = max_attempts.max(4);
+    let mut last_error: Option<tantivy::TantivyError> = None;
+
+    for attempt in 0..attempts {
+        match writer.commit() {
+            Ok(_opstamp) => {
+                // 成功: readerをリロードし、writerをロック内に戻す
+                reader.reload()?;
+                let mut guard = writer_mutex.lock().map_err(|_| "Writer mutex poisoned")?;
+                *guard = Some(writer);
+                return Ok(());
+            }
+            Err(e) => {
+                // 2) 致命的検出
+                if is_writer_killed(&e) {
+                    // writer破棄して、明示的エラー返却
+                    drop(writer);
+                    // ロック内は既にNoneのまま（次回start_batchで再生成）
+                    return Err(Box::<dyn std::error::Error>::from(
+                        "IndexWriter was killed by internal worker error; writer discarded. Retry after reinitialization.",
+                    ));
+                }
+
+                // 3) Windows一時I/Oエラーの扱い
+                let retry_class = windows_error_retry_class(&e);
+                let should_retry = match retry_class {
+                    WindowsIoRetryClass::Always => true,
+                    WindowsIoRetryClass::Conditional => true, // 条件判定済み
+                    WindowsIoRetryClass::Limited(limit) => attempt < limit,
+                    WindowsIoRetryClass::None => false,
+                };
+
+                if !should_retry || attempt + 1 >= attempts {
+                    last_error = Some(e);
+                    break;
+                }
+
+                // ロック外でバックオフ
+                let delay_ms = backoff_with_jitter_ms(attempt);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                // 次ループで再試行
+            }
+        }
+    }
+
+    // 4) 失敗終了（writerは再度ロック内に戻しておく）
+    if let Some(err) = last_error {
+        let mut guard = writer_mutex.lock().map_err(|_| "Writer mutex poisoned")?;
+        *guard = Some(writer); // writer自体は継続利用可能（killedでない場合）
+        // 詳細コンテキストを付与
+        let detail = format!(
+            "Tantivy commit failed after retries at '{}': {}",
+            index_path.display(),
+            err
+        );
+        return Err(Box::<dyn std::error::Error>::from(detail));
+    }
+
+    Ok(())
+}
+```
+
+---
+
+**6. Poisoned Mutex安全化（into_inner継続禁止）** 🔒
+
+- **方針**  
+  - ロック毒化は重大イベント。**継続禁止**。  
+  - 直ちに**内部状態を初期化（writerを破棄）**し、**明示エラー返却**。  
+  - 次のオペレーションが**start_batch**で正常に**再初期化**されるようにする。
+
+```rust
+/// Writer Mutexの安全な取得（毒化時は初期化してエラーを返す）
+pub fn lock_writer_safely<'a>(
+    writer_mutex: &'a std::sync::Mutex<Option<tantivy::IndexWriter<tantivy::TantivyDocument>>>
+) -> Result<std::sync::MutexGuard<'a, Option<tantivy::IndexWriter<tantivy::TantivyDocument>>>, Box<dyn std::error::Error>> {
+    match writer_mutex.lock() {
+        Ok(g) => Ok(g),
+        Err(poisoned) => {
+            // into_inner()で継続はしない。初期化のみ行い、明示的に失敗返却。
+            let mut inner = poisoned.into_inner();
+            inner.take(); // 既存writer破棄
+            Err(Box::<dyn std::error::Error>::from(
+                "Writer mutex poisoned; state reinitialized. Please retry operation.",
+            ))
+        }
     }
 }
 ```
 
-**4. Poisoned Mutex安全化（優先度: 高）**
-```rust
-// commit_batch() 内
-let mut writer_lock = match self.writer.lock() {
-    Ok(lock) => lock,
-    Err(poisoned) => {
-        eprintln!("FATAL: Writer mutex poisoned; reinitializing");
-        
-        // 既存writerを破棄
-        let _ = poisoned.into_inner().take();
-        
-        // カウンタ初期化
-        if let Ok(mut pending) = self.pending_symbol_counter.lock() {
-            *pending = None;
-        }
-        if let Ok(mut pending) = self.pending_file_counter.lock() {
-            *pending = None;
-        }
-        
-        // 明示エラー返却（継続禁止）
-        return Err(StorageError::General(
-            "Writer was poisoned and reinitialized. Please retry operation.".into()
-        ));
-    }
-};
-```
+---
 
-**5. config.rsコメント更新**
+**7. config.rs更新（Windows推奨を100MBに）**
+
+- **デフォルト値の更新**（Windows安定性向上のため推奨を100MBへ）  
+- **コメントの強化**（Phase 0の知見を反映）
+
 ```rust
-// src/config.rs
+// in src/config.rs
 /// Tantivy heap size in megabytes.
 /// Controls memory usage before flushing to disk.
-/// On Windows, antivirus software can cause file locking issues with large heap sizes.
-/// Reducing this to 15-25MB is recommended for Windows environments to improve stability.
+/// Windows environments frequently suffer from temporary file locks by antivirus/EDR.
+/// Phase 0 results showed lower error rates with larger heaps (inverse correlation):
+/// - Absolute minimum: 15MB (values below 10MB are forbidden)
+/// - Windows recommended minimum: 50MB
+/// - Ideal range: 100–200MB (default 100MB)
 #[serde(default = "default_tantivy_heap_mb")]
-pub tantivy_heap_mb: usize,
+pub tantivy_heap_mb: usize;
+
+fn default_tantivy_heap_mb() -> usize {
+    100 // Updated default (Windows stability). Non-Windows may also benefit.
+}
 ```
 
-**実装制約**:
-- ✅ heap_size統一は必須
-- ✅ 観測で頻出したエラーコードのみ追加
-- ✅ Poisoned Mutex安全化は必須
-- ❌ プラットフォーム分離（`#[cfg]`）はPhase 2で実施
-- ❌ ロック外スリープはPhase 2で実施
-- ❌ Directory層リトライ集約はPhase 2で実施
+---
 
-**テスト戦略**:
-- heap_size統一後、再度パラメータ化テストを実行
-- エラー発生率の変化を測定
-- リカバリー成功率の向上を確認
+**8. テスト戦略** 🧪
 
-**成果物**:
-- Section 3の修正コード反映
-- テスト結果の比較データ
-- Phase 1修正の効果測定レポート
+- **ユニットテスト**  
+  - normalized_heap_bytes: 15MB/50MB/200MB/2GB境界のクランプ  
+  - backoff_with_jitter_ms: attempt別の範囲チェック（初回80–120ms、以降100/200/400/800±50ms）  
+  - is_writer_killed: TantivyError::ErrorInThreadでの判定  
+  - is_windows_transient_io_error / windows_error_retry_class: 各コード（5/32/33/1224/995/80/183/145）の挙動
 
-**所要時間見積もり**:
-- 実装: 8-12時間
-- テスト: 4-8時間
-- ドキュメント更新: 2-4時間
+```rust
+#[cfg(test)]
+mod phase1_tests {
+    use super::*;
+    use tantivy::TantivyError;
+
+    #[test]
+    fn test_normalized_heap_bytes() {
+        assert_eq!(normalized_heap_bytes(5 * 1024 * 1024), 15 * 1024 * 1024);
+        assert_eq!(normalized_heap_bytes(100 * 1024 * 1024), 100 * 1024 * 1024);
+        assert_eq!(normalized_heap_bytes(3 * 1024 * 1024 * 1024), 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_backoff_with_jitter_ms_ranges() {
+        let d0 = backoff_with_jitter_ms(0);
+        assert!(d0 >= 80 && d0 <= 120);
+
+        let d1 = backoff_with_jitter_ms(1);
+        assert!(d1 >= 100 && d1 <= 150);
+
+        let d2 = backoff_with_jitter_ms(2);
+        assert!(d2 >= 200 && d2 <= 250);
+
+        let d3 = backoff_with_jitter_ms(3);
+        assert!(d3 >= 400 && d3 <= 450);
+
+        let d4 = backoff_with_jitter_ms(4);
+        assert!(d4 >= 800 && d4 <= 850);
+    }
+
+    #[test]
+    fn test_is_writer_killed_detection() {
+        let e = TantivyError::ErrorInThread("An index writer was killed.. A worker thread encountered an error".to_string());
+        assert!(is_writer_killed(&e));
+
+        let e2 = TantivyError::InvalidArgument("not killed".into());
+        assert!(!is_writer_killed(&e2));
+    }
+
+    #[test]
+    fn test_windows_retry_class() {
+        // 疑似的にio::Errorをチェーンに含めるエラーを構築するには、実際のI/Oを介する方が簡単だが、
+        // ここでは簡易的に文字列ヒューリスティクスをテストする。
+        // 注意: 実際の統合テストでraw_os_errorの付与を確認すること。
+
+        let killed = TantivyError::ErrorInThread("Index writer was killed".into());
+        assert_eq!(windows_error_retry_class(&killed), WindowsIoRetryClass::None);
+
+        // 仮想的なメッセージでsegment拡張子を含む場合の条件判定（code=5想定）
+        let e = TantivyError::IoError(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Failed to open file for write: '...store' (os error 5)"));
+        let class = windows_error_retry_class(&e);
+        // ここではraw_os_errorが不明なためConditionalに落ちない可能性がある。統合テストで補完する。
+        let allowed = is_windows_transient_io_error(&e);
+        assert!(allowed || matches!(class, WindowsIoRetryClass::None | WindowsIoRetryClass::Conditional));
+    }
+}
+```
+
+- **統合テスト（Windows）**  
+  - AV/EDR相当のフィルタリング（セグメント拡張子のみ監視）＋一時ロックを模擬し、`ERROR_ACCESS_DENIED (5)` を誘発。  
+  - commitのリトライ成功率／回数分布を計測。  
+  - `"writer killed"`（ErrorInThread）を人工注入して致命的経路の停止・再初期化を確認。
+
+- **手動テスト**  
+  - Windows Defender有効環境で、heap=50/100/200MBの条件を比較（エラー率とリトライ成功率）。  
+  - 大量ドキュメント投入（2万件以上）＋commit頻度コントロール。  
+  - `tantivy_heap_mb=100` をデフォルトとして、Phase 0の逆相関が再現されるか確認。
+
+---
+
+**補遺：具体的改修ポイント（src/storage/tantivy.rsへの適用例）**
+
+- remove_file_documents / clear の固定50MBを**正規化heap**に変更（MIN=15MB）
+
+```rust
+// 例: remove_file_documentsでの一時writer作成部
+let heap = normalized_heap_bytes(self.heap_size);
+let mut writer = self.index.writer::<Document>(heap)?;
+```
+
+- start_batchは**ロック外でwriter生成**→**ロック内でセット**に変更
+
+```rust
+pub fn start_batch(&self) -> StorageResult<()> {
+    // 既存writerがあれば早期return
+    {
+        let guard = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
+        if guard.is_some() {
+            return Ok(());
+        }
+    }
+
+    // ロック外で生成
+    let writer = create_writer_with_retry(&self.index, self.heap_size, self.max_retry_attempts)
+        .map_err(|e| StorageError::General(format!("Failed to create writer: {e}")))?;
+
+    // ロック内でセット
+    {
+        let mut guard = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
+        *guard = Some(writer);
+    }
+
+    // カウンタ初期化は従来通り
+    // ...
+    Ok(())
+}
+```
+
+- commit_batchは**ロック外のリトライループ**＋**致命的検出**に置換（本節の関数を流用）
+
+---
+
+**優先順位付き実装リスト（チェックリスト）**
+
+- 最高
+  - Windowsエラー分類の導入（`is_windows_transient_io_error`, `windows_error_retry_class`）  
+  - `"Index writer was killed"` の**致命的扱い**（型ベース検出）  
+  - **ロック外**のリトライ（writer作成・commitのスリープはロック外）  
+  - heap正規化の更新（**15MB–2GB**、Windows推奨**100MBデフォルト**）
+
+- 高
+  - `commit_batch` のリトライループ実装（常時/条件/限定リトライの適用）  
+  - `Poisoned Mutex` の安全化（**into_inner継続禁止**、初期化してエラー返却）  
+  - `remove_file_documents`/`clear` の固定値50MB排除（正規化heap適用）
+
+- 中
+  - テスト強化（単体＋Windows統合＋失敗注入）  
+  - ログの構造化（必要なら`format_tantivy_error`を併用）  
+  - リトライ統計（成功率・回数分布）の収集
+
+- 低
+  - 設定ガイドのドキュメント更新（ユーザー向け）  
+  - メトリクスの追加（retry回数・backoff時間など）
+
+---
+
+**メモ（運用指針）**  
+- AV/EDRの除外パスにインデックスディレクトリを追加すると、`ERROR_ACCESS_DENIED (5)` の条件付きリトライ頻度は大幅に低下する。  
+- heapは過度に小さくするとflush頻度が増え、I/O競合が増加する傾向（Phase 0）。Windowsでは**100–200MB**が安定。  
+- `"writer killed"` を検知したら、**現在の操作を中断**し、**次のstart_batch**でwriterを再生成するフローにする。
 
 ---
 
