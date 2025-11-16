@@ -22,6 +22,7 @@ pub mod config_watcher;
 pub mod file_info;
 pub mod fs_watcher;
 pub mod progress;
+pub mod retry;
 pub mod simple;
 pub mod transaction;
 pub mod walker;
@@ -33,6 +34,10 @@ pub use config_watcher::ConfigFileWatcher;
 pub use file_info::{FileInfo, calculate_hash, get_utc_timestamp};
 pub use fs_watcher::{FileSystemWatcher, WatchError};
 pub use progress::IndexStats;
+pub use retry::{
+    WindowsIoRetryClass, backoff_with_jitter_ms, is_windows_transient_io_error, is_writer_killed,
+    normalized_heap_bytes, windows_error_retry_class,
+};
 pub use simple::SimpleIndexer;
 pub use transaction::{FileTransaction, IndexTransaction};
 pub use walker::FileWalker;

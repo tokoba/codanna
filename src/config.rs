@@ -370,7 +370,9 @@ fn default_parallel_threads() -> usize {
     num_cpus::get()
 }
 fn default_tantivy_heap_mb() -> usize {
-    50 // Universal default that balances performance and permissions
+    100 // Windows推奨デフォルト（Phase 1: Section 11.7.2.7）
+        // Phase 0観測により、heap_sizeとエラー率に逆相関を確認。
+        // 15MBは絶対最小値だが、Windowsでは50MB以上、理想的には100-200MBを推奨。
 }
 fn default_max_retry_attempts() -> u32 {
     3 // Exponential backoff: 100ms, 200ms, 400ms
@@ -898,11 +900,10 @@ impl Settings {
                     "# Number of parallel threads for indexing (defaults to CPU count)\n",
                 );
             } else if line.starts_with("tantivy_heap_mb = ") {
-                result.push_str("\n# Tantivy heap size in megabytes\n");
-                result.push_str("# Reduce to 15-25MB if you have permission issues (antivirus, SELinux, containers)\n");
-                result.push_str(
-                    "# Increase to 100-200MB if you have plenty of RAM and no restrictions\n",
-                );
+                result.push_str("\n# Tantivy heap size in megabytes (Phase 1推奨値：Section 11.7.2.7)\n");
+                result.push_str("# Windows環境では最小50MB、推奨100-200MBに設定してください\n");
+                result.push_str("# 15MBは絶対最小値（制約環境のみ）。heap_sizeとエラー率は逆相関します\n");
+                result.push_str("# 詳細: docs/tantivy-io-error-fix.md Section 11.7.2.7参照\n");
             } else if line.starts_with("max_retry_attempts = ") {
                 result.push_str("\n# Retry attempts for transient file system errors\n");
                 result.push_str("# Exponential backoff: 100ms, 200ms, 400ms delays\n");

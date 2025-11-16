@@ -4,6 +4,10 @@
 //! enabling semantic search across documentation, code, and symbols.
 
 use super::{MetadataKey, StorageError, StorageResult};
+use crate::indexing::retry::{
+    backoff_with_jitter_ms, is_windows_transient_io_error, is_writer_killed,
+    normalized_heap_bytes, windows_error_retry_class, WindowsIoRetryClass,
+};
 use crate::relationship::RelationshipMetadata;
 use crate::vector::{ClusterId, EmbeddingGenerator, SegmentOrdinal, VectorId, VectorSearchEngine};
 use crate::{FileId, RelationKind, Relationship, SymbolId, SymbolKind};
@@ -600,56 +604,61 @@ impl DocumentIndex {
         })
     }
 
-    /// Create index writer with retry logic for transient errors
+    /// Create index writer with retry logic for transient errors (Phase 1: Section 11.7.2.4)
+    /// 
+    /// Windows一時I/Oエラー（AV干渉等）に対する包括的リトライロジック。
+    /// - raw_os_errorコードベースの詳細分類（5/32/33/1224/995/80/183/145）
+    /// - "Index writer was killed" の致命的エラー検出
+    /// - 指数バックオフ + jitter（80-120ms初回、以降100→200→400→800ms + 0-50ms）
     fn create_writer_with_retry(&self) -> Result<IndexWriter<Document>, tantivy::TantivyError> {
-        for attempt in 0..self.max_retry_attempts {
-            match self.index.writer::<Document>(self.heap_size) {
+        let heap = normalized_heap_bytes(self.heap_size);
+        let attempts = self.max_retry_attempts.max(4);
+
+        for attempt in 0..attempts {
+            match self.index.writer::<Document>(heap) {
                 Ok(writer) => return Ok(writer),
                 Err(e) => {
-                    // Check for transient I/O errors using ErrorKind
-                    let is_transient = std::error::Error::source(&e)
-                        .and_then(|s| s.downcast_ref::<std::io::Error>())
-                        .map(|io_err| {
-                            matches!(
-                                io_err.kind(),
-                                std::io::ErrorKind::PermissionDenied
-                                    | std::io::ErrorKind::TimedOut
-                                    | std::io::ErrorKind::WouldBlock
-                            )
-                        })
-                        .unwrap_or(false);
+                    // 致命的エラー検出
+                    if is_writer_killed(&e) {
+                        return Err(e);
+                    }
 
-                    if is_transient && attempt < self.max_retry_attempts - 1 {
-                        let delay = 100 * (1 << attempt);
-                        eprintln!(
-                            "Attempt {}/{}: Transient permission error, retrying after {}ms",
-                            attempt + 1,
-                            self.max_retry_attempts,
-                            delay
-                        );
-                        std::thread::sleep(std::time::Duration::from_millis(delay));
-                    } else {
+                    // Windows一時I/Oエラーの判定
+                    let is_transient = is_windows_transient_io_error(&e);
+                    if !is_transient || attempt + 1 >= attempts {
                         // Phase 0: Observation logging (Section 11.7.1)
-                        // This log does not change behavior - only observes error details
                         if debug_enabled() {
                             let details = format_tantivy_error(&e);
                             let code = extract_windows_error_code(&e);
                             eprintln!(
-                                "(Phase0) op=create_writer index={} heap_mb={} attempt={}/{} windows_code={:?}\n{}",
+                                "(Phase1) op=create_writer index={} heap_mb={} attempt={}/{} windows_code={:?} is_transient={}\n{}",
                                 self.index_path.display(),
-                                self.heap_size / 1_000_000,
+                                heap / 1_000_000,
                                 attempt + 1,
-                                self.max_retry_attempts,
+                                attempts,
                                 code,
+                                is_transient,
                                 details
                             );
                         }
                         return Err(e);
                     }
+
+                    // リトライ待機（指数バックオフ + jitter）
+                    let delay_ms = backoff_with_jitter_ms(attempt);
+                    if debug_enabled() {
+                        eprintln!(
+                            "(Phase1) create_writer retry: attempt={}/{} delay={}ms",
+                            attempt + 1,
+                            attempts,
+                            delay_ms
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 }
             }
         }
-        unreachable!()
+        unreachable!("create_writer_with_retry: loop should return earlier")
     }
 
     /// Enable vector search support with the given engine and storage path
@@ -1092,82 +1101,127 @@ impl DocumentIndex {
         Ok(())
     }
 
-    /// Commit the current batch and reload the reader
+    /// Commit the current batch and reload the reader (Phase 1: Section 11.7.2.5)
+    /// 
+    /// Windows一時I/Oエラーに対する包括的リトライロジック。
+    /// - Mutexロックの取り出し（take）とロック解放
+    /// - "Index writer was killed" の致命的エラー検出
+    /// - raw_os_errorコードベースのリトライ分類
+    /// - 指数バックオフ + jitter待機（ロック外）
+    /// - リトライ失敗時のwriter再格納
     pub fn commit_batch(&self) -> StorageResult<()> {
-        let mut writer_lock = match self.writer.lock() {
-            Ok(lock) => lock,
-            Err(poisoned) => {
-                eprintln!("Warning: Recovering from poisoned writer mutex in commit_batch");
-                poisoned.into_inner()
-            }
+        // 1) writerを取り出し（take）てロック解放
+        let mut writer = {
+            let mut guard = self
+                .writer
+                .lock()
+                .map_err(|_| StorageError::General("Writer mutex poisoned".to_string()))?;
+            guard
+                .take()
+                .ok_or_else(|| StorageError::General("No active batch writer".to_string()))?
         };
-        if let Some(mut writer) = writer_lock.take() {
-            // Try to commit with better error context
+
+        let attempts = self.max_retry_attempts.max(4);
+        let mut last_error: Option<tantivy::TantivyError> = None;
+
+        for attempt in 0..attempts {
             match writer.commit() {
                 Ok(_opstamp) => {
-                    // Successful commit
+                    // 成功：readerリロードと後処理
+                    self.reader.reload()?;
+
+                    // Clear the pending symbol counter after commit
+                    if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+                        *pending_guard = None;
+                    }
+
+                    // Clear the pending file counter after commit
+                    if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
+                        *pending_guard = None;
+                    }
+
+                    // Process pending vector embeddings if enabled
+                    if self.has_vector_support() && self.embedding_generator.is_some() {
+                        self.post_commit_vector_processing()?;
+                    }
+
+                    // Build cluster cache if vector support is enabled
+                    self.build_cluster_cache()?;
+
+                    // writerを再格納
+                    let mut guard = self
+                        .writer
+                        .lock()
+                        .map_err(|_| StorageError::General("Writer mutex poisoned".to_string()))?;
+                    *guard = Some(writer);
+                    return Ok(());
                 }
                 Err(e) => {
-                    // Check for permission errors using ErrorKind
-                    let is_permission_error = std::error::Error::source(&e)
-                        .and_then(|s| s.downcast_ref::<std::io::Error>())
-                        .map(|io_err| matches!(io_err.kind(), std::io::ErrorKind::PermissionDenied))
-                        .unwrap_or(false);
-
-                    if is_permission_error {
+                    // 2) 致命的検出
+                    if is_writer_killed(&e) {
+                        drop(writer);
                         return Err(StorageError::General(format!(
-                            "Failed to commit index due to permission error.\n\
-                            This can happen when:\n\
-                            1. Security software is scanning the index directory\n\
-                            2. Another process has locked the files\n\
-                            3. Insufficient file system permissions\n\
-                            \nOriginal error: {e}\n\
-                            \nTry:\n\
-                            - Reducing tantivy_heap_mb in settings (15-25MB)\n\
-                            - Adding .codanna to security software exclusions\n\
-                            - Ensuring no other codanna processes are running"
+                            "IndexWriter was killed by internal worker error; writer discarded. {}",
+                            e
                         )));
                     }
-                    
-                    // Phase 0: Observation logging (Section 11.7.1)
-                    // This log does not change behavior - only observes error details
+
+                    // 3) Windows一時I/Oエラーの扱い
+                    let retry_class = windows_error_retry_class(&e);
+                    let should_retry = match retry_class {
+                        WindowsIoRetryClass::Always => true,
+                        WindowsIoRetryClass::Conditional => true,
+                        WindowsIoRetryClass::Limited(limit) => attempt < limit,
+                        WindowsIoRetryClass::None => false,
+                    };
+
+                    if !should_retry || attempt + 1 >= attempts {
+                        // Phase 0: Observation logging
+                        if debug_enabled() {
+                            let details = format_tantivy_error(&e);
+                            let code = extract_windows_error_code(&e);
+                            eprintln!(
+                                "(Phase1) op=commit index={} heap_mb={} attempt={}/{} windows_code={:?} retry_class={:?}\n{}",
+                                self.index_path.display(),
+                                self.heap_size / 1_000_000,
+                                attempt + 1,
+                                attempts,
+                                code,
+                                retry_class,
+                                details
+                            );
+                        }
+                        last_error = Some(e);
+                        break;
+                    }
+
+                    // ロック外でバックオフ
+                    let delay_ms = backoff_with_jitter_ms(attempt);
                     if debug_enabled() {
-                        let details = format_tantivy_error(&e);
-                        let code = extract_windows_error_code(&e);
                         eprintln!(
-                            "(Phase0) op=commit index={} heap_mb={} windows_code={:?}\n{}",
-                            self.index_path.display(),
-                            self.heap_size / 1_000_000,
-                            code,
-                            details
+                            "(Phase1) commit retry: attempt={}/{} delay={}ms retry_class={:?}",
+                            attempt + 1, attempts, delay_ms, retry_class
                         );
                     }
-                    
-                    return Err(e.into());
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 }
             }
-
-            // Reload the reader to see new documents
-            self.reader.reload()?;
-
-            // Clear the pending symbol counter after commit
-            if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
-                *pending_guard = None;
-            }
-
-            // Clear the pending file counter after commit
-            if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
-                *pending_guard = None;
-            }
-
-            // Process pending vector embeddings if enabled
-            if self.has_vector_support() && self.embedding_generator.is_some() {
-                self.post_commit_vector_processing()?;
-            }
-
-            // Build cluster cache if vector support is enabled
-            self.build_cluster_cache()?;
         }
+
+        // 4) 失敗終了（writerは再度ロック内に戻す）
+        if let Some(err) = last_error {
+            let mut guard = self
+                .writer
+                .lock()
+                .map_err(|_| StorageError::General("Writer mutex poisoned".to_string()))?;
+            *guard = Some(writer);
+            return Err(StorageError::General(format!(
+                "Tantivy commit failed after retries at '{}': {}",
+                self.index_path.display(),
+                err
+            )));
+        }
+
         Ok(())
     }
 
