@@ -111,6 +111,7 @@ pub(crate) fn format_tantivy_error(err: &tantivy::TantivyError) -> String {
 /// Extract Windows error code from tantivy error (for test/observation use)
 #[cfg(target_os = "windows")]
 pub(crate) fn extract_windows_error_code(err: &tantivy::TantivyError) -> Option<i32> {
+    // Try raw_os_error first
     let mut src = std::error::Error::source(err);
     while let Some(e) = src {
         if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
@@ -120,7 +121,22 @@ pub(crate) fn extract_windows_error_code(err: &tantivy::TantivyError) -> Option<
         }
         src = e.source();
     }
-    None
+    
+    // Fallback: Parse from error message
+    let msg = err.to_string();
+    if msg.contains("os error") {
+        msg.split("os error")
+            .nth(1)
+            .and_then(|s| s.trim().trim_start_matches(':').trim().split(')').next())
+            .and_then(|s| s.trim().parse::<i32>().ok())
+    } else if msg.contains("code:") {
+        msg.split("code:")
+            .nth(1)
+            .and_then(|s| s.trim().split_whitespace().next())
+            .and_then(|s| s.trim_end_matches(',').parse::<i32>().ok())
+    } else {
+        None
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -612,7 +628,7 @@ impl DocumentIndex {
     /// - 指数バックオフ + jitter（80-120ms初回、以降100→200→400→800ms + 0-50ms）
     fn create_writer_with_retry(&self) -> Result<IndexWriter<Document>, tantivy::TantivyError> {
         let heap = normalized_heap_bytes(self.heap_size);
-        let attempts = self.max_retry_attempts.max(4);
+        let attempts = self.max_retry_attempts.max(6);
 
         for attempt in 0..attempts {
             match self.index.writer::<Document>(heap) {
@@ -682,6 +698,25 @@ impl DocumentIndex {
         }
     }
 
+    /// Handle Tantivy error with writer cleanup if killed (Phase 1.5: Writer killed detection)
+    /// 
+    /// "Index writer was killed"検出時にwriterを破棄し、次のstart_batchで再初期化を促す。
+    /// 並行テスト環境でのTantivyワーカースレッドkill対策。
+    fn handle_tantivy_error(&self, err: tantivy::TantivyError) -> StorageError {
+        if is_writer_killed(&err) {
+            // Killed検出: writerを破棄して次回再初期化
+            if let Ok(mut guard) = self.writer.lock() {
+                *guard = None;
+            }
+            StorageError::General(format!(
+                "IndexWriter was killed by internal worker error; writer discarded. Please retry with start_batch. {}",
+                err
+            ))
+        } else {
+            err.into()
+        }
+    }
+
     /// Commit with retry logic for temporary writer (Phase 1: Section 11.7.2.5)
     /// 
     /// remove_file_documents/clear等の一時的なwriter用commit。
@@ -690,7 +725,7 @@ impl DocumentIndex {
         &self,
         writer: &mut IndexWriter<Document>,
     ) -> Result<(), tantivy::TantivyError> {
-        let attempts = self.max_retry_attempts.max(4);
+        let attempts = self.max_retry_attempts.max(6);
         let mut last_error: Option<tantivy::TantivyError> = None;
 
         for attempt in 0..attempts {
@@ -1048,7 +1083,7 @@ impl DocumentIndex {
                     new_doc.add_u64(self.schema.cluster_id, cluster_id.get() as u64);
                     new_doc.add_u64(self.schema.has_vector, 1);
 
-                    writer.add_document(new_doc)?;
+                    writer.add_document(new_doc).map_err(|e| self.handle_tantivy_error(e))?;
                 }
             }
         }
@@ -1187,7 +1222,7 @@ impl DocumentIndex {
             doc.add_u64(self.schema.has_vector, 0); // Will be set to 1 after vector processing
         }
 
-        writer.add_document(doc)?;
+        writer.add_document(doc).map_err(|e| self.handle_tantivy_error(e))?;
 
         // Track symbol for vector embedding if vector support is enabled
         if self.has_vector_support() && self.embedding_generator.is_some() {
@@ -1224,7 +1259,7 @@ impl DocumentIndex {
                 .ok_or_else(|| StorageError::General("No active batch writer".to_string()))?
         };
 
-        let attempts = self.max_retry_attempts.max(4);
+        let attempts = self.max_retry_attempts.max(6);
         let mut last_error: Option<tantivy::TantivyError> = None;
 
         for attempt in 0..attempts {
@@ -2400,7 +2435,7 @@ impl DocumentIndex {
             }
         }
 
-        writer.add_document(doc)?;
+        writer.add_document(doc).map_err(|e| self.handle_tantivy_error(e))?;
         Ok(())
     }
 
@@ -2462,7 +2497,7 @@ impl DocumentIndex {
         doc.add_text(self.schema.file_hash, hash);
         doc.add_u64(self.schema.file_timestamp, timestamp);
 
-        writer.add_document(doc)?;
+        writer.add_document(doc).map_err(|e| self.handle_tantivy_error(e))?;
         Ok(())
     }
 
@@ -2496,7 +2531,7 @@ impl DocumentIndex {
             if import.is_type_only { 1 } else { 0 },
         );
 
-        writer.add_document(doc)?;
+        writer.add_document(doc).map_err(|e| self.handle_tantivy_error(e))?;
         Ok(())
     }
 
@@ -2614,7 +2649,7 @@ impl DocumentIndex {
         doc.add_text(self.schema.meta_key, key_str);
         doc.add_u64(self.schema.meta_value, value);
 
-        writer.add_document(doc)?;
+        writer.add_document(doc).map_err(|e| self.handle_tantivy_error(e))?;
         Ok(())
     }
 
