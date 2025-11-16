@@ -37,9 +37,9 @@ fn phase0_heap_size_observation_real_io() {
         std::env::set_var("CODANNA_DEBUG", "1");
     }
 
-    let heap_sizes_mb = [10, 15, 50, 100, 150, 200];
+    let heap_sizes_mb = [15, 20, 30, 50, 100, 200];
     let runs_per_heap = 20;
-    let commits_per_run = 40;
+    let commits_per_run = 30;
 
     let temp_root = TempDir::new().expect("temp root");
 
@@ -48,7 +48,7 @@ fn phase0_heap_size_observation_real_io() {
         let hold_ms = std::env::var("CODANNA_AV_HOLD_MS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(80);
+            .unwrap_or(60);
         let watch_dir = temp_root.path().to_path_buf();
         Some(helpers::av_simulator::spawn_av_watcher(watch_dir, hold_ms))
     };

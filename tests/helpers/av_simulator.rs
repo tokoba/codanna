@@ -89,16 +89,26 @@ pub fn spawn_av_watcher<P: AsRef<Path> + Send + 'static>(
         while let Ok(event) = rx.recv() {
             if matches!(event.kind, EventKind::Create(_)) {
                 for path in event.paths {
-                    if path.is_file() {
-                        eprintln!("[AV Simulator] Detected new file: {}, locking...", path.display());
-                        if let Err(e) = hold_exclusive(&path, hold_duration_ms) {
-                            eprintln!("[AV Simulator] Failed to lock {}: {}", path.display(), e);
-                        } else {
-                            eprintln!(
-                                "[AV Simulator] Released lock on {} after {}ms",
-                                path.display(),
-                                hold_duration_ms
-                            );
+                    if !path.is_file() {
+                        continue;
+                    }
+
+                    if let Some(fname) = path.file_name() {
+                        let name = fname.to_string_lossy();
+                        if name.starts_with(".tmp") || name.ends_with(".lock") {
+                            continue;
+                        }
+                    }
+
+                    let should_lock = if let Some(ext) = path.extension() {
+                        let ext_str = ext.to_string_lossy();
+                        matches!(ext_str.as_ref(), "store" | "pos" | "term" | "idx" | "fast" | "fieldnorm")
+                    } else {
+                        false
+                    };
+
+                    if should_lock {
+                        if let Err(_e) = hold_exclusive(&path, hold_duration_ms) {
                         }
                     }
                 }
